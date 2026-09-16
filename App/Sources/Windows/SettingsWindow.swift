@@ -323,7 +323,7 @@ struct DictationPane: View {
                         settings.setSmartTranscription(enabled)
                     }
             } footer: {
-                Text("Removes filler words and applies self-corrections (\"at 2 — actually 3\") as it transcribes. Off = word for word — unless tone matching below is on, which rewrites either way.")
+                Text("Removes filler words and applies self-corrections after transcription. Off = word for word, unless tone matching below is on.")
             }
 
             Section {
@@ -344,25 +344,13 @@ struct DictationPane: View {
                         // footer still tells the truth about how it has gone.
                         if enabled { LiveStats().clearStreak() }
                     }
-                    // The legacy transport is a different endpoint entirely, so
-                    // live cannot run alongside it. Disabling the control says so;
-                    // leaving it tappable but inert is the exact silent no-op this
-                    // app keeps writing comments about.
-                    .disabled(settings.usesLegacyTranscribeEndpoint)
             } header: {
                 Text("Experimental")
             } footer: {
-                if settings.usesLegacyTranscribeEndpoint {
-                    Text("Live transcription is unavailable while the legacy transcription endpoint is on in Advanced.")
-                } else {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Tone runs a second model over the transcript so email reads like email and chat like chat — it adds about half a second and sends the transcript text once more. Loud rooms judges your voice against the actual room noise instead of a fixed level. Live streams your voice as you speak instead of uploading at the end — if the connection stumbles it quietly falls back to the normal upload, so nothing is ever lost. All off by default.")
-                        // Live failing is invisible by design — it just looks like
-                        // a slower dictation — so without this the question "is it
-                        // actually working?" has no answer.
-                        if let summary = LiveStats().summary {
-                            Text(summary)
-                        }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Tone runs a second model over the transcript so email reads like email and chat like chat. Loud rooms judges your voice against the room noise. Live streams your voice as you speak and falls back to the saved recording if the connection fails. All are off by default.")
+                    if let summary = LiveStats().summary {
+                        Text(summary)
                     }
                 }
             }
@@ -420,8 +408,8 @@ struct PrivacyPane: View {
             }
 
             Section {
-                LabeledContent("Audio") { Text("Sent to the Gemini API with your key") }
-                LabeledContent("Transcript text") { Text("Only if tone matching is on — otherwise it never leaves") }
+                LabeledContent("Audio") { Text("Sent to the OpenAI API with your key") }
+                LabeledContent("Transcript text") { Text("Sent again when Smart transcription or tone matching is on") }
                 LabeledContent("Dictionary terms") { Text("Sent with the audio, so names are spelled right as you speak") }
                 LabeledContent("Everything else") { Text("Never leaves this Mac") }
             } header: {
@@ -451,11 +439,12 @@ struct AdvancedPane: View {
     private let settings = SettingsStore()
     /// Placeholders derive from the REAL defaults — a hardcoded string went
     /// stale the day the preview model was retired (dogfood).
-    private static let defaultConfig = GeminiConfig()
+    private static let defaultConfig = OpenAIConfig()
     @State private var apiKey = ""
     @State private var keyStatus: KeyStatus = KeychainStore.loadAPIKey() == nil ? .missing : .stored
     @State private var endpoint = SettingsStore().endpointOverride ?? ""
     @State private var transcribeModel = SettingsStore().transcribeModelOverride ?? ""
+    @State private var liveModel = SettingsStore().liveModelOverride ?? ""
     @State private var cleanupModel = SettingsStore().cleanupModelOverride ?? ""
 
     enum KeyStatus { case missing, stored, validating, valid, invalid, saveFailed, savedOffline }
@@ -468,8 +457,6 @@ struct AdvancedPane: View {
         let trimmed = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         return !trimmed.isEmpty && SettingsStore.usableEndpointURL(trimmed) == nil
     }
-    @State private var legacyEndpoint = SettingsStore().usesLegacyTranscribeEndpoint
-
     var body: some View {
         Form {
             Section {
@@ -501,13 +488,13 @@ struct AdvancedPane: View {
                         Button("Remove Key…", role: .destructive) { removeKey() }
                     }
                     Spacer()
-                    Link("Get a key in Google AI Studio", destination: URL(string: "https://aistudio.google.com/apikey")!)
+                    Link("Get a key from OpenAI", destination: URL(string: "https://platform.openai.com/api-keys")!)
                         .font(JotUI.TypeScale.labelSmall())
                 }
             } header: {
-                Text("Gemini API key")
+                Text("OpenAI API key")
             } footer: {
-                Text("Stored in your Mac's Keychain and only ever sent to Google.")
+                Text("Stored in your Mac's Keychain and only ever sent to OpenAI.")
             }
 
             Section {
@@ -530,6 +517,13 @@ struct AdvancedPane: View {
                         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                         settings.setTranscribeModelOverride(trimmed.isEmpty ? nil : trimmed)
                     }
+                TextField("Live transcription model", text: $liveModel,
+                          prompt: Text(Self.defaultConfig.liveModel))
+                    .font(JotUI.TypeScale.code)
+                    .onChange(of: liveModel) { _, value in
+                        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                        settings.setLiveModelOverride(trimmed.isEmpty ? nil : trimmed)
+                    }
                 TextField("Formatting model", text: $cleanupModel,
                           prompt: Text(Self.defaultConfig.cleanupModel))
                     .font(JotUI.TypeScale.code)
@@ -543,14 +537,6 @@ struct AdvancedPane: View {
                 Text("Preview models get renamed — override here if a model 404s. Leave blank for defaults — every edit saves as you type.")
             }
 
-            Section {
-                Toggle("Use the previous transcription endpoint", isOn: $legacyEndpoint)
-                    .onChange(of: legacyEndpoint) { _, enabled in
-                        settings.setLegacyTranscribeEndpoint(enabled)
-                    }
-            } footer: {
-                Text("Jot transcribes through Gemini's newer interactions endpoint, which is what makes Smart transcription possible. If it starts misbehaving, this switches back to the older one — transcription still works, but it will be word-for-word and Smart transcription will have no effect.")
-            }
         }
         // Key saved elsewhere (onboarding, dev-file migration) while this pane is
         // open: refresh the badge — but never clobber in-flight feedback.
@@ -582,8 +568,8 @@ struct AdvancedPane: View {
         guard !key.isEmpty else { return }
         keyStatus = .validating
         Task {
-            let client = GeminiClient(apiKey: { key })
-            let check = await client.validateKey(endpoint: settings.geminiConfig.endpoint)
+            let client = OpenAIClient(apiKey: { key })
+            let check = await client.validateKey(endpoint: settings.openAIConfig.endpoint)
             // Same rule as onboarding: a key the server REJECTED never gets
             // saved, but a check we simply could not perform must not wall the
             // user out. The distinction now comes from the response itself
@@ -658,7 +644,7 @@ struct AboutPane: View {
             }
             .font(JotUI.TypeScale.body())
 
-            Text("Open source under the Apache License 2.0.\nThis is not an officially supported Google product.")
+            Text("Open source under the Apache License 2.0.\nThis is an independent project and is not an official OpenAI product.")
                 .font(JotUI.TypeScale.labelSmall())
                 .foregroundStyle(JotUI.Colors.onSurfaceVariant)
                 .multilineTextAlignment(.center)

@@ -106,6 +106,8 @@ public struct DictionaryStore: Sendable {
             let clean = String(
                 term.replacingOccurrences(of: "\n", with: " ")
                     .replacingOccurrences(of: "\r", with: " ")
+                    .replacingOccurrences(of: "<", with: "")
+                    .replacingOccurrences(of: ">", with: "")
                     .prefix(60)
             ).trimmingCharacters(in: .whitespaces)
             guard !clean.isEmpty else { continue }

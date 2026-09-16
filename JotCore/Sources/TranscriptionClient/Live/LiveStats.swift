@@ -27,7 +27,7 @@ import Foundation
 /// rule is about not phoning home, not about refusing to count for the user's own
 /// benefit, and the Settings footer that reads these counters is the whole point:
 /// the person deciding whether to leave live mode on gets the evidence.
-public struct LiveStats: Sendable {
+public struct LiveStats: @unchecked Sendable {
 
     /// Why a dictation did not use its live transcript. Kept coarse on purpose:
     /// these are for a human reading one line of Settings, not an analytics

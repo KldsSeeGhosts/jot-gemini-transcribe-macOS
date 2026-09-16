@@ -182,7 +182,7 @@ public final class DictationCoordinator: ObservableObject {
     /// Returns a live session, or nil when live mode is off or unavailable.
     /// Injected so the coordinator never needs to know about sockets or keys,
     /// and so tests can drive every live failure mode with no network.
-    private let makeLiveSession: @MainActor () -> LiveTranscribing?
+    private let makeLiveSession: @MainActor (DictationContext) -> LiveTranscribing?
 
     public init(
         audioFactory: @escaping @MainActor () -> AudioCapturing,
@@ -192,7 +192,7 @@ public final class DictationCoordinator: ObservableObject {
         now: @escaping () -> Date = Date.init,
         noiseHandlingEnabled: @escaping @MainActor () -> Bool = { SettingsStore().experimentalNoiseHandling },
         secureInputActive: @escaping @MainActor () -> Bool = { SecureInput.isActive },
-        makeLiveSession: @escaping @MainActor () -> LiveTranscribing? = { nil }
+        makeLiveSession: @escaping @MainActor (DictationContext) -> LiveTranscribing? = { _ in nil }
     ) {
         self.audioFactory = audioFactory
         self.transcription = transcription
@@ -381,7 +381,7 @@ public final class DictationCoordinator: ObservableObject {
         do {
             // Latched once, here: the user flipping the setting mid-dictation
             // must not produce a recording that is half streamed and half not.
-            let live = makeLiveSession()
+            let live = makeLiveSession(session?.context ?? DictationContext())
             liveSession = live
             liveActiveForSession = live != nil
 

@@ -67,7 +67,7 @@ public protocol AudioCapturing: AnyObject {
     /// Starts the engine and begins writing CAF to `url` immediately.
     ///
     /// `pcmSink`, when non-nil, receives every converted buffer as raw bytes in
-    /// `targetFormat` — 16kHz mono Int16 little-endian, which is byte-for-byte
+    /// `targetFormat` — 24kHz mono Int16 little-endian, which is byte-for-byte
     /// what the Live API's WebSocket wants. It fires AFTER the CAF write has
     /// succeeded, so "audio is on disk before any network I/O begins" holds
     /// per-chunk, not merely per-session.

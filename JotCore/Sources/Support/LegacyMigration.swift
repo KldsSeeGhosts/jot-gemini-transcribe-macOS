@@ -13,18 +13,16 @@
 // limitations under the License.
 
 import Foundation
-import Security
 
 /// One-shot migration from the app's pre-rename identity ("Google Transcribe",
 /// bundle id com.google.transcribe). This file is the ONLY place the legacy
-/// identifiers may appear — everything a user accumulated (API key, settings,
+/// identifiers may appear — everything a user accumulated (settings,
 /// dictionary, History) must survive the rename invisibly.
 ///
 /// macOS permissions (mic, Accessibility) are keyed by bundle id and CANNOT be
 /// migrated — onboarding re-collects them on first launch as Jot.
 public enum LegacyMigration {
     private static let legacyBundleID = "com.google.transcribe"
-    private static let legacyKeychainService = "com.google.transcribe"
     private static let legacyAppSupportFolder = "Google Transcribe"
     private static let migratedFlag = "didMigrateFromGoogleTranscribe"
 
@@ -34,10 +32,9 @@ public enum LegacyMigration {
 
         migrateAppSupportFolder()
         migrateDefaultsDomain()
-        migrateKeychainKey()
 
         defaults.set(true, forKey: migratedFlag)
-        Log.session.info("LegacyMigration: completed (folder, defaults, keychain)")
+        Log.session.info("LegacyMigration: completed (folder and defaults)")
     }
 
     /// recordings/ + history.sqlite move wholesale; FileLayout resolves the NEW
@@ -81,47 +78,4 @@ public enum LegacyMigration {
         }
     }
 
-    /// The Gemini key re-homes to the new Keychain service; the old item is
-    /// removed so nothing is left behind.
-    private static func migrateKeychainKey() {
-        guard KeychainStore.loadAPIKey() == nil, let legacy = readLegacyKey() else { return }
-        if KeychainStore.saveAPIKey(legacy) {
-            deleteLegacyKey()
-            Log.permissions.info("LegacyMigration: API key re-homed to the new Keychain service")
-        }
-    }
-
-    private static func readLegacyKey() -> String? {
-        for dataProtection in [true, false] {
-            var query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: legacyKeychainService,
-                kSecAttrAccount as String: "gemini-api-key",
-                kSecReturnData as String: true,
-                kSecMatchLimit as String: kSecMatchLimitOne,
-            ]
-            if dataProtection {
-                query[kSecUseDataProtectionKeychain as String] = true
-            }
-            var item: CFTypeRef?
-            if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data {
-                return String(data: data, encoding: .utf8)
-            }
-        }
-        return nil
-    }
-
-    private static func deleteLegacyKey() {
-        for dataProtection in [true, false] {
-            var query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: legacyKeychainService,
-                kSecAttrAccount as String: "gemini-api-key",
-            ]
-            if dataProtection {
-                query[kSecUseDataProtectionKeychain as String] = true
-            }
-            SecItemDelete(query as CFDictionary)
-        }
-    }
 }

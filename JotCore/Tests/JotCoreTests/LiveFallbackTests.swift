@@ -67,8 +67,11 @@ final class LiveFallbackTests: XCTestCase {
     /// A clean stream whose bytes reconcile is usable.
     func testCleanReconciledStreamIsUsable() async throws {
         let (transcriber, _) = makeTranscriber(script: [
-            frame(["setupComplete": [:] as [String: Any]]),
-            frame(["serverContent": ["inputTranscription": ["text": "Ship it Friday."]]]),
+            frame(["type": "session.updated"]),
+            frame([
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "Ship it Friday.",
+            ]),
         ])
         try await transcriber.begin()
         // 800 frames of audio = 1,600 bytes.
@@ -82,8 +85,11 @@ final class LiveFallbackTests: XCTestCase {
     /// missing from the transcript even though it reads perfectly. Must be nil.
     func testByteMismatchIsRejectedEvenWithCleanText() async throws {
         let (transcriber, _) = makeTranscriber(script: [
-            frame(["setupComplete": [:] as [String: Any]]),
-            frame(["serverContent": ["inputTranscription": ["text": "…by Friday."]]]),
+            frame(["type": "session.updated"]),
+            frame([
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "…by Friday.",
+            ]),
         ])
         try await transcriber.begin()
         transcriber.enqueue(Data(repeating: 0x01, count: 1_600))   // 800 frames streamed
@@ -97,8 +103,11 @@ final class LiveFallbackTests: XCTestCase {
     /// is broken, and a broken counter cannot be trusted to catch truncation.
     func testMoreBytesThanFramesIsAlsoRejected() async throws {
         let (transcriber, _) = makeTranscriber(script: [
-            frame(["setupComplete": [:] as [String: Any]]),
-            frame(["serverContent": ["inputTranscription": ["text": "hello"]]]),
+            frame(["type": "session.updated"]),
+            frame([
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "hello",
+            ]),
         ])
         try await transcriber.begin()
         transcriber.enqueue(Data(repeating: 0x01, count: 4_000))
@@ -108,7 +117,7 @@ final class LiveFallbackTests: XCTestCase {
     }
 
     func testNoFinalTranscriptFallsBack() async throws {
-        let (transcriber, _) = makeTranscriber(script: [frame(["setupComplete": [:] as [String: Any]])])
+        let (transcriber, _) = makeTranscriber(script: [frame(["type": "session.updated"])])
         try await transcriber.begin()
         transcriber.enqueue(Data(repeating: 0x01, count: 1_600))
         let result = await transcriber.finish(deadline: 0.4, framesWritten: 800)
@@ -117,8 +126,11 @@ final class LiveFallbackTests: XCTestCase {
 
     func testServerErrorFallsBack() async throws {
         let (transcriber, _) = makeTranscriber(script: [
-            frame(["setupComplete": [:] as [String: Any]]),
-            frame(["serverContent": ["inputTranscription": ["text": "some words"]]]),
+            frame(["type": "session.updated"]),
+            frame([
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "some words",
+            ]),
             frame(["error": ["message": "quota exhausted"]]),
         ])
         try await transcriber.begin()
@@ -133,8 +145,11 @@ final class LiveFallbackTests: XCTestCase {
     /// silently change how someone's name is spelled.
     func testReplacementRulesApplyToLiveText() async throws {
         let transport = LiveTranscriptionSessionTests.FakeTransport(script: [
-            frame(["setupComplete": [:] as [String: Any]]),
-            frame(["serverContent": ["inputTranscription": ["text": "send it to Amar"]]]),
+            frame(["type": "session.updated"]),
+            frame([
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "send it to Amar",
+            ]),
         ])
         let session = LiveTranscriptionSession(transport: transport, setup: LiveSetup(), ring: PCMRing())
         let transcriber = LiveTranscriber(

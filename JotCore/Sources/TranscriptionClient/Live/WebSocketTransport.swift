@@ -14,20 +14,11 @@
 
 import Foundation
 
-/// The real socket.
-///
-/// The credential goes in the `x-goog-api-key` HEADER, never `?key=`. Every
-/// published example for this endpoint uses the query form, and it does work —
-/// but a TLS-terminating proxy logs the request line, query string included, so
-/// `?key=` writes the user's long-lived API key into whatever keeps those logs.
-/// The header form was verified against the live service by
-/// `LiveWebSocketAuthProbeTests`: both arms return `setupComplete`, so there is
-/// no reason to accept the worse one. This matches `GeminiClient`'s rule for
-/// every other call the app makes.
+/// The OpenAI Realtime socket. The user's key is sent in the Authorization
+/// header and never appears in the URL or logs.
 public final class WebSocketTransport: LiveTransport, @unchecked Sendable {
 
-    public static let endpoint =
-        "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+    public static let endpoint = "wss://api.openai.com/v1/realtime?intent=transcription"
 
     private let apiKey: @Sendable () -> String
     private let session: URLSession
@@ -48,20 +39,20 @@ public final class WebSocketTransport: LiveTransport, @unchecked Sendable {
 
     public func connect() async throws {
         var request = URLRequest(url: URL(string: Self.endpoint)!)
-        request.setValue(apiKey(), forHTTPHeaderField: "x-goog-api-key")
+        request.setValue("Bearer \(apiKey())", forHTTPHeaderField: "Authorization")
         let task = session.webSocketTask(with: request)
-        lock.lock(); self.task = task; lock.unlock()
+        withTask { $0 = task }
         task.resume()
     }
 
     public func send(_ data: Data) async throws {
-        lock.lock(); let task = self.task; lock.unlock()
+        let task = withTask { $0 }
         guard let task else { throw LiveError.setupTimedOut }
         try await task.send(.data(data))
     }
 
     public func receive() async throws -> Data {
-        lock.lock(); let task = self.task; lock.unlock()
+        let task = withTask { $0 }
         guard let task else { throw LiveError.setupTimedOut }
         switch try await task.receive() {
         case .data(let data):
@@ -74,7 +65,19 @@ public final class WebSocketTransport: LiveTransport, @unchecked Sendable {
     }
 
     public func close() {
-        lock.lock(); let task = self.task; self.task = nil; lock.unlock()
+        let task = withTask { task -> URLSessionWebSocketTask? in
+            let current = task
+            task = nil
+            return current
+        }
         task?.cancel(with: .goingAway, reason: nil)
+    }
+
+    private func withTask<T>(
+        _ body: (inout URLSessionWebSocketTask?) -> T
+    ) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&task)
     }
 }

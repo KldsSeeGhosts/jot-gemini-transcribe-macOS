@@ -28,7 +28,7 @@ final class DictationController {
     private let engine = EventTapEngine(key: .fn)
     private let hud = PillHUDController()
     private let earcons = EarconPlayer()
-    private let transcriptionService: GeminiTranscriptionService
+    private let transcriptionService: OpenAITranscriptionService
     private let historyStore: HistoryStore?
     private var recoveryScanner: RecoveryScanner?
     private var retryQueue: RetryQueue?
@@ -52,7 +52,7 @@ final class DictationController {
     /// needs both the Keychain and the Dictionary, and the coordinator should
     /// know about neither.
     @MainActor
-    private static func makeLiveSession() -> LiveTranscribing? {
+    private static func makeLiveSession(context: DictationContext) -> LiveTranscribing? {
         let settings = SettingsStore()
         guard settings.liveTranscriptionActive else { return nil }
         // A live path that is reliably broken is worse than one that is off: every
@@ -69,26 +69,36 @@ final class DictationController {
         }
         guard let key = KeychainStore.loadAPIKey(), !key.isEmpty else { return nil }
         let dictionary = DictionaryStore()
+        let config = settings.openAIConfig
         let session = LiveTranscriptionSession(
             transport: WebSocketTransport(apiKey: { key }),
             setup: LiveSetup(
-                smart: settings.smartTranscriptionEnabled,
+                model: config.liveModel,
                 // The same terms the batch path biases with, so switching modes
                 // does not quietly change how someone's name gets spelled.
-                customVocabulary: dictionary.vocabulary()
+                customVocabulary: dictionary.sanitizedVocabulary()
             )
         )
+        let cleanupClient = OpenAIClient(apiKey: { key })
+        let cleanupService = OpenAITranscriptionService(client: cleanupClient)
+        let usesCleanup = settings.smartTranscriptionEnabled
+            || settings.smartCleanupPassEnabled
         return LiveTranscriber(
             session: session,
-            modelID: "gemini-3.5-transcribe-live",
-            replacementRules: { DictionaryStore().replacementRules() }
+            modelID: usesCleanup
+                ? "\(config.liveModel)+\(config.cleanupModel)"
+                : config.liveModel,
+            replacementRules: { DictionaryStore().replacementRules() },
+            postProcess: { raw in
+                await cleanupService.clean(raw: raw, context: context)
+            }
         )
     }
 
     init() {
         KeychainStore.migrateDevKeyFileIfPresent()
-        let client = GeminiClient(apiKey: { KeychainStore.loadAPIKey() })
-        let service = GeminiTranscriptionService(client: client)
+        let client = OpenAIClient(apiKey: { KeychainStore.loadAPIKey() })
+        let service = OpenAITranscriptionService(client: client)
         transcriptionService = service
         historyStore = try? HistoryStore.standard()
         coordinator = DictationCoordinator(
@@ -109,7 +119,7 @@ final class DictationController {
                     targetPID: app?.processIdentifier
                 )
             },
-            makeLiveSession: Self.makeLiveSession
+            makeLiveSession: Self.makeLiveSession(context:)
         )
     }
 
@@ -168,11 +178,11 @@ final class DictationController {
                 // Don't assert what we haven't read: with Smart transcription off,
                 // or on the legacy endpoint, "still on" would be a lie.
                 let settings = SettingsStore()
-                let stillSmart = settings.smartTranscriptionEnabled && !settings.usesLegacyTranscribeEndpoint
+                let stillSmart = settings.smartTranscriptionEnabled
                 let tail = stillSmart
                     ? "Smart transcription is still on."
                     : "Re-enable it in Settings → Dictation."
-                self?.showBackgroundNotice("Turned off tone matching — the second model kept misfiring. \(tail)", for: 5.0, sound: nil)
+                self?.showBackgroundNotice("Turned off smart formatting because the cleanup model kept misfiring. \(tail)", for: 5.0, sound: nil)
             }
         }
 
@@ -231,7 +241,7 @@ final class DictationController {
             engineActive = true
             if KeychainStore.loadAPIKey() == nil {
                 // New-user path: dictation can't work yet — say exactly where to go.
-                onStatusChange?("Add your Gemini API key in Settings → Advanced")
+                onStatusChange?("Add your OpenAI API key in Settings → Advanced")
                 onStatusItemState?(.attention)
             } else {
                 onStatusChange?("Ready — hold \(SettingsStore().hotkeyKey.displayName) to dictate")
@@ -295,7 +305,7 @@ final class DictationController {
         } else if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
             onStatusChange?("Allow microphone access in System Settings to dictate")
         } else {
-            onStatusChange?("Add your Gemini API key in Settings → Advanced")
+            onStatusChange?("Add your OpenAI API key in Settings → Advanced")
         }
         onStatusItemState?(.attention)
     }
@@ -334,7 +344,7 @@ final class DictationController {
                 // engine.start() is reentrant; hud.show() is idempotent.
                 activateEngine()
             } else {
-                onStatusChange?("Add your Gemini API key in Settings → Advanced")
+                onStatusChange?("Add your OpenAI API key in Settings → Advanced")
                 onStatusItemState?(.attention)
             }
         default:
@@ -516,7 +526,7 @@ final class DictationController {
 
     // MARK: - State → HUD/earcons (frame-synced: sound fires on the same tick)
 
-    /// Matches GeminiSweep's duration — the finished sentence stays up exactly
+    /// Matches ModelSweep's duration, so the finished sentence stays up exactly
     /// as long as the sweep across it takes.
     private static let correctionHold: TimeInterval = 1.5
     private var correctionHoldUntil = Date.distantPast
@@ -856,19 +866,19 @@ final class DictationController {
 
     private static func copy(for failure: DictationFailure) -> String {
         switch failure {
-        case .network: return "Couldn't reach Gemini — saved to History"
+        case .network: return "Couldn't reach OpenAI — saved to History"
         case .auth:
             return KeychainStore.loadAPIKey() == nil
-                ? "Add your Gemini API key in Settings — recording saved to History"
+                ? "Add your OpenAI API key in Settings — recording saved to History"
                 : "API key isn't working — saved to History"
         case .modelAccess:
             return SettingsStore().transcribeModelOverride != nil
                 ? "That model isn't available to your key — check Settings → Advanced. Saved to History"
                 : "Your key can't use the transcription model yet — recording saved to History"
-        case .badRequest: return "Gemini rejected the request — saved to History"
+        case .badRequest: return "OpenAI rejected the request — saved to History"
         case .rateLimited: return "Rate limited — History will retry it shortly"
         case .noMicrophone: return "No microphone found — connect one to dictate"
-        case .quotaExhausted: return "Daily quota reached for your key — check Google AI Studio. Saved to History"
+        case .quotaExhausted: return "API quota reached for your key — check the OpenAI dashboard. Saved to History"
         case .timeout: return "Timed out — saved to History"
         case .validation: return "Couldn't transcribe — saved to History"
         case .safetyBlocked: return "The API declined this one — saved to History"

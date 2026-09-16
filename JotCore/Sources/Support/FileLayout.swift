@@ -15,7 +15,7 @@
 import Foundation
 
 /// Where everything lives on disk. One folder per dictation, Superwhisper-proven
-/// layout: audio.caf (crash-safe master), audio.flac (upload copy, M3+), meta.json.
+/// layout: audio.caf (crash-safe master), a transient upload copy, and meta.json.
 public enum FileLayout {
     /// Test hook: unit tests MUST sandbox here — the suite once wrote failed-
     /// session folders straight into the user's real History.
@@ -45,12 +45,12 @@ public enum FileLayout {
 
     public static func audioCAF(in folder: URL) -> URL { folder.appendingPathComponent("audio.caf") }
 
-    /// Duration estimate from CAF byte size (16kHz mono Int16 ≈ 32,000 B/s) — for
+    /// Duration estimate from CAF byte size (24kHz mono Int16 ≈ 48,000 B/s) — for
     /// crash-recovered sessions whose meta never got a duration (audit #7).
     public static func estimatedDuration(ofCAF url: URL) -> Double? {
         guard let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int,
               bytes > 4096 else { return nil }
-        return Double(bytes) / 32_000
+        return Double(bytes) / 48_000
     }
     public static func audioFLAC(in folder: URL) -> URL { folder.appendingPathComponent("audio.flac") }
     public static func metaJSON(in folder: URL) -> URL { folder.appendingPathComponent("meta.json") }

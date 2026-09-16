@@ -14,8 +14,8 @@
 
 import SwiftUI
 
-/// The 5-bar amplitude-reactive waveform (Gemini Live "condensed into a tiny pill").
-/// Live state: Google Blue bars with fast-attack/slow-release smoothing and a calm
+/// The 5-bar amplitude-reactive waveform.
+/// Live state: blue bars with fast-attack/slow-release smoothing and a calm
 /// idle undulation. Processing state: bars freeze into a silhouette and run the
 /// four-color traveling sweep — the only place the brand quad animates.
 struct WaveformView: View {

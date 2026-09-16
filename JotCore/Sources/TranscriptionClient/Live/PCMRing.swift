@@ -37,8 +37,8 @@ import Foundation
 /// checkable.
 public final class PCMRing: @unchecked Sendable {
 
-    /// 16kHz mono Int16 = 32,000 bytes per second of audio.
-    public static let bytesPerSecond = 32_000
+    /// 24kHz mono Int16 = 48,000 bytes per second of audio.
+    public static let bytesPerSecond = 48_000
 
     private let capacityBytes: Int
     private var chunks: [Data] = []

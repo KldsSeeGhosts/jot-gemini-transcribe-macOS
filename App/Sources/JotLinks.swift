@@ -18,7 +18,7 @@ import Foundation
 /// the docs can never drift apart.
 enum JotLinks {
     static let author = URL(string: "https://x.com/ammaar")!
-    static let repository = URL(string: "https://github.com/google-gemini/jot-gemini-transcribe-macOS")!
-    static let issues = URL(string: "https://github.com/google-gemini/jot-gemini-transcribe-macOS/issues")!
-    static let privacy = URL(string: "https://github.com/google-gemini/jot-gemini-transcribe-macOS/blob/main/docs/PRIVACY.md")!
+    static let repository = URL(string: "https://github.com/KldsSeeGhosts/jot-openai-transcribe-macOS")!
+    static let issues = URL(string: "https://github.com/KldsSeeGhosts/jot-openai-transcribe-macOS/issues")!
+    static let privacy = URL(string: "https://github.com/KldsSeeGhosts/jot-openai-transcribe-macOS/blob/main/docs/PRIVACY.md")!
 }

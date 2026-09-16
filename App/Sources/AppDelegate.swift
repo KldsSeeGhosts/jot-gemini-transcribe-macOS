@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Before ANYTHING reads the Keychain, defaults, or History: carry over
         // everything from the app's pre-rename identity.
         LegacyMigration.runIfNeeded()
+        OpenAIProviderMigration.runIfNeeded()
         // AFTER LegacyMigration: smartFormatting is in its key list and has to be
         // pulled out of the old defaults domain before this reads it.
         FormattingSettingsMigration.runIfNeeded()

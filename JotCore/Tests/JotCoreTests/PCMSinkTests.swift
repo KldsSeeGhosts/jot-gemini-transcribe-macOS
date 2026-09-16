@@ -30,10 +30,10 @@ import XCTest
 /// Hence a test rather than a comment.
 final class PCMSinkTests: XCTestCase {
 
-    /// 16kHz mono Int16 interleaved — the format the engine converts to and
+    /// 24kHz mono Int16 interleaved — the format the engine converts to and
     /// exactly what the Live API's WebSocket expects.
     private func makeFormat() -> AVAudioFormat {
-        AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true)!
+        AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 24_000, channels: 1, interleaved: true)!
     }
 
     private func makeBuffer(frames: AVAudioFrameCount, fill: Int16 = 0) -> AVAudioPCMBuffer {
@@ -124,10 +124,10 @@ final class PCMSinkTests: XCTestCase {
                      "a non-Int16 buffer must be nil, never empty Data")
     }
 
-    /// One second of speech is 32,000 bytes, matching the rate FileLayout already
+    /// One second of speech is 48,000 bytes, matching the rate FileLayout
     /// uses to estimate duration. Cheap cross-check that the format has not drifted.
     func testOneSecondIs32KB() throws {
-        let bytes = try XCTUnwrap(AudioCaptureEngine.pcmBytes(from: makeBuffer(frames: 16_000)))
-        XCTAssertEqual(bytes.count, 32_000)
+        let bytes = try XCTUnwrap(AudioCaptureEngine.pcmBytes(from: makeBuffer(frames: 24_000)))
+        XCTAssertEqual(bytes.count, 48_000)
     }
 }

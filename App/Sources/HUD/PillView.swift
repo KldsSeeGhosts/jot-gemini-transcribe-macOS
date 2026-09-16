@@ -84,7 +84,7 @@ struct PillView: View {
                             .animation(nil, value: model.partial)
                             .accessibilityHidden(true) // VoiceOver must not read a moving guess
                             // Sweeps once when the finished text lands.
-                            .geminiSweep(trigger: model.corrected)
+                            .modelSweep(trigger: model.corrected)
                     }
                     if locked {
                         stopButton
@@ -127,7 +127,7 @@ struct PillView: View {
                                 .frame(maxWidth: .infinity, alignment: .trailing)
                                 .animation(nil, value: model.partial)
                                 .accessibilityHidden(true)
-                                .geminiSweep(trigger: model.corrected)
+                                .modelSweep(trigger: model.corrected)
                         } else {
                             // The edit itself: fillers and self-corrections struck
                             // out, then closed up. Keyed on the corrected text so a

@@ -128,7 +128,6 @@ public actor LiveTranscriptionSession {
         }
         guard didSetup else { throw LiveError.setupTimedOut }
 
-        try await transport.send(LiveProtocol.activityStartFrame())
         startPumps()
     }
 
@@ -186,8 +185,8 @@ public actor LiveTranscriptionSession {
                 guard let event = LiveProtocol.decode(frame) else { continue }
                 switch event {
                 case .partial(let text):
-                    latestPartial = text
-                    partialSink.yield(text)
+                    latestPartial += text
+                    partialSink.yield(latestPartial)
                 case .final(let text):
                     finals.append(text)
                     latestPartial = ""

@@ -29,8 +29,8 @@ public extension Notification.Name {
     static let gtSmartFormattingAutoDegraded = Notification.Name("com.ammaar.jot.auto-degraded")
 }
 
-/// UserDefaults-backed settings (M3 minimal; the Settings UI lands at M7).
-/// Endpoint + model IDs are overridable because preview models get renamed.
+/// UserDefaults-backed settings.
+/// Endpoint + model IDs are overridable because model names change over time.
 public struct SettingsStore: Sendable {
     private static let defaults = UserDefaults.standard
 
@@ -63,6 +63,25 @@ public struct SettingsStore: Sendable {
         Self.set(done, forKey: "hasCompletedOnboarding")
     }
 
+    public var openAIConfig: OpenAIConfig {
+        var config = OpenAIConfig()
+        if let url = Self.usableEndpointURL(Self.defaults.string(forKey: "endpointOverride")) {
+            config.endpoint = url
+        }
+        if let model = Self.defaults.string(forKey: "transcribeModelOverride"), !model.isEmpty {
+            config.transcribeModel = model
+        }
+        if let model = Self.defaults.string(forKey: "liveModelOverride"), !model.isEmpty {
+            config.liveModel = model
+        }
+        if let model = Self.defaults.string(forKey: "cleanupModelOverride"), !model.isEmpty {
+            config.cleanupModel = model
+        }
+        return config
+    }
+
+    /// Kept so older Gemini-focused tests and downstream forks still compile.
+    /// The shipping app uses `openAIConfig`.
     public var geminiConfig: GeminiConfig {
         var config = GeminiConfig()
         if let url = Self.usableEndpointURL(Self.defaults.string(forKey: "endpointOverride")) {
@@ -112,11 +131,9 @@ public struct SettingsStore: Sendable {
 
     // MARK: - Formatting policy
 
-    /// How a dictation gets formatted. Two independent flags rather than a
-    /// three-valued enum, because all four combinations are meaningful — in
-    /// particular (nativeSmart: false, cleanupPass: true) is the exact pipeline
-    /// Jot shipped before native smart existed, and that is the configuration you
-    /// want reachable if smart mode ever regresses server-side.
+    /// How a dictation gets formatted. OpenAI transcription is kept as the raw
+    /// reference. Smart transcription and per-app tone both use the guarded text
+    /// cleanup pass, with tone set to neutral when only Smart is enabled.
     public struct FormattingPolicy: Equatable, Sendable {
         public var nativeSmart: Bool
         public var cleanupPass: Bool
@@ -127,9 +144,7 @@ public struct SettingsStore: Sendable {
         }
 
         public var mode: GeminiClient.TranscriptionMode { nativeSmart ? .smart : .verbatim }
-        /// The gate only has a real reference to compare against when a second
-        /// model actually rewrote the text.
-        public var runsValidationGate: Bool { cleanupPass }
+        public var runsValidationGate: Bool { nativeSmart || cleanupPass }
     }
 
     public var formattingPolicy: FormattingPolicy {
@@ -139,7 +154,7 @@ public struct SettingsStore: Sendable {
         )
     }
 
-    /// Native `mode: "smart"` — the default transcription path.
+    /// Runs the raw OpenAI transcript through Jot's guarded cleanup prompt.
     public var smartTranscriptionEnabled: Bool {
         Self.defaults.object(forKey: "smartTranscription") as? Bool ?? true
     }
@@ -166,14 +181,8 @@ public struct SettingsStore: Sendable {
         Self.set(enabled, forKey: "smartCleanupPass")
     }
 
-    /// Escape hatch back to the pre-native-smart transport.
-    ///
-    /// `/v1beta/interactions` is days old. For the cost of one settings row, a
-    /// server-side regression in smart mode becomes something a user can switch
-    /// off rather than something that needs a hotfix release. Smart formatting is
-    /// unavailable on the legacy endpoint (`mode` returns an empty transcript
-    /// there), so this necessarily means verbatim + the optional tone pass.
-    /// Remove once native smart has a clean dogfood run.
+    /// Retained for preferences compatibility with earlier Jot builds. OpenAI
+    /// has one recorded-audio endpoint, so this value no longer changes routing.
     public var usesLegacyTranscribeEndpoint: Bool {
         Self.defaults.bool(forKey: "legacyTranscribeEndpoint")
     }
@@ -221,17 +230,15 @@ public struct SettingsStore: Sendable {
         Self.set(enabled, forKey: "liveTranscription")
     }
 
-    /// Live needs the interactions-era transport; the legacy escape hatch is a
-    /// different endpoint entirely. Rather than let the two contradict each other
-    /// silently, the hatch wins and live stands down.
     public var liveTranscriptionActive: Bool {
-        liveTranscription && !usesLegacyTranscribeEndpoint
+        liveTranscription
     }
 
     // Raw override values for the Settings UI — panes must not duplicate the
     // defaults keys (a rename would silently desync display from effect).
     public var endpointOverride: String? { Self.defaults.string(forKey: "endpointOverride") }
     public var transcribeModelOverride: String? { Self.defaults.string(forKey: "transcribeModelOverride") }
+    public var liveModelOverride: String? { Self.defaults.string(forKey: "liveModelOverride") }
     public var cleanupModelOverride: String? { Self.defaults.string(forKey: "cleanupModelOverride") }
 
     public func setEndpointOverride(_ raw: String?) {
@@ -240,6 +247,10 @@ public struct SettingsStore: Sendable {
 
     public func setTranscribeModelOverride(_ raw: String?) {
         Self.set(raw, forKey: "transcribeModelOverride")
+    }
+
+    public func setLiveModelOverride(_ raw: String?) {
+        Self.set(raw, forKey: "liveModelOverride")
     }
 
     public func setCleanupModelOverride(_ raw: String?) {

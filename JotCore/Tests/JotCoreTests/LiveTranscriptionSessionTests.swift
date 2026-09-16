@@ -69,11 +69,12 @@ final class LiveTranscriptionSessionTests: XCTestCase {
             lock.lock(); defer { lock.unlock() }
             return sent.compactMap { data in
                 guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
-                if root["setup"] != nil { return "setup" }
-                guard let realtime = root["realtimeInput"] as? [String: Any] else { return nil }
-                if realtime["activityStart"] != nil { return "activityStart" }
-                if realtime["activityEnd"] != nil { return "activityEnd" }
-                if realtime["audio"] != nil { return "audio" }
+                switch root["type"] as? String {
+                case "session.update": return "setup"
+                case "input_audio_buffer.append": return "audio"
+                case "input_audio_buffer.commit": return "commit"
+                default: break
+                }
                 return nil
             }
         }
@@ -83,12 +84,18 @@ final class LiveTranscriptionSessionTests: XCTestCase {
         try! JSONSerialization.data(withJSONObject: object)
     }
 
-    private func setupCompleteFrame() -> Data { frame(["setupComplete": [:] as [String: Any]]) }
+    private func setupCompleteFrame() -> Data { frame(["type": "session.updated"]) }
     private func finalFrame(_ text: String) -> Data {
-        frame(["serverContent": ["inputTranscription": ["text": text]]])
+        frame([
+            "type": "conversation.item.input_audio_transcription.completed",
+            "transcript": text,
+        ])
     }
     private func partialFrame(_ text: String) -> Data {
-        frame(["serverContent": ["interimInputTranscription": ["text": text]]])
+        frame([
+            "type": "conversation.item.input_audio_transcription.delta",
+            "delta": text,
+        ])
     }
 
     private func makeSession(_ transport: FakeTransport, ring: PCMRing = PCMRing()) -> LiveTranscriptionSession {
@@ -108,7 +115,7 @@ final class LiveTranscriptionSessionTests: XCTestCase {
     }
 
     /// The ordering guarantee that stops the user's last words being cut off:
-    /// activityEnd must reach the wire AFTER every audio chunk queued before it.
+    /// commit must reach the wire AFTER every audio chunk queued before it.
     func testActivityEndNeverOvertakesQueuedAudio() async throws {
         let transport = FakeTransport(script: [setupCompleteFrame(), finalFrame("done")])
         let session = makeSession(transport)
@@ -117,21 +124,20 @@ final class LiveTranscriptionSessionTests: XCTestCase {
         _ = await session.finish(deadline: 2.0)
 
         let kinds = transport.sentKinds
-        let endIndex = try XCTUnwrap(kinds.firstIndex(of: "activityEnd"))
+        let endIndex = try XCTUnwrap(kinds.firstIndex(of: "commit"))
         let audioIndices = kinds.enumerated().filter { $0.element == "audio" }.map(\.offset)
         XCTAssertFalse(audioIndices.isEmpty, "audio must actually have been sent")
         XCTAssertTrue(audioIndices.allSatisfy { $0 < endIndex },
-                      "every audio chunk must precede activityEnd — the server finalizes on what it has")
+                      "every audio chunk must precede commit because the server finalizes on what it has")
     }
 
-    func testSetupIsSentBeforeActivityStart() async throws {
+    func testSetupIsTheFirstFrame() async throws {
         let transport = FakeTransport(script: [setupCompleteFrame(), finalFrame("x")])
         let session = makeSession(transport)
         try await session.start()
         _ = await session.finish(deadline: 1.0)
         let kinds = transport.sentKinds
         XCTAssertEqual(kinds.first, "setup")
-        XCTAssertEqual(kinds.dropFirst().first, "activityStart")
     }
 
     // MARK: - Everything that must fall back
@@ -201,7 +207,7 @@ final class LiveTranscriptionSessionTests: XCTestCase {
     }
 
     func testGoAwayMakesTheSessionUnusable() async throws {
-        let transport = FakeTransport(script: [setupCompleteFrame(), frame(["goAway": [:] as [String: Any]])])
+        let transport = FakeTransport(script: [setupCompleteFrame(), frame(["type": "session.closed"])])
         let session = makeSession(transport)
         try await session.start()
         try await Task.sleep(nanoseconds: 120_000_000)
@@ -215,8 +221,8 @@ final class LiveTranscriptionSessionTests: XCTestCase {
         let transport = FakeTransport(script: [setupCompleteFrame(), finalFrame("partial words")])
         let session = makeSession(transport)
         try await session.start()
-        // setup + activityStart already sent; fail on the next write.
-        transport.sendErrorAfter = 2
+        // setup is already sent; fail on the next write.
+        transport.sendErrorAfter = 1
         for _ in 0..<4 { session.enqueue(Data(repeating: 0x05, count: 3_328)) }
         try await Task.sleep(nanoseconds: 150_000_000)
         let outcome = await session.finish(deadline: 0.5)
@@ -230,8 +236,8 @@ final class LiveTranscriptionSessionTests: XCTestCase {
     func testPartialsAreNeverPromotedToTheOutcome() async throws {
         let transport = FakeTransport(script: [
             setupCompleteFrame(),
-            partialFrame("ship it on fry"),
-            partialFrame("ship it on friday"),
+            partialFrame("ship it on "),
+            partialFrame("friday"),
             finalFrame("Ship it on Friday."),
         ])
         let session = makeSession(transport)

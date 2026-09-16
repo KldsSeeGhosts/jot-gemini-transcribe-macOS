@@ -14,7 +14,7 @@
 
 import SwiftUI
 
-/// The Gemini gradient sweeping once across text, then settling into ink.
+/// The accent gradient sweeping once across text, then settling into ink.
 ///
 /// This is the moment the live transcript stops being a guess: the interim text
 /// the model was revising is replaced by its finished, formatted answer, and the
@@ -25,10 +25,9 @@ import SwiftUI
 /// the app describe the same product: a 100° four-stop gradient at 260% width,
 /// swept from 140% to -20% over 1.5s on cubic-bezier(.3,.5,.2,1), then cleared.
 ///
-/// **This is the only place the Gemini gradient appears** — in the app as on the
-/// site. It reads as a signal precisely because nothing else uses it; spend it
-/// twice and it becomes decoration.
-struct GeminiSweep: ViewModifier {
+/// This is the only place the accent gradient appears. It reads as a signal
+/// because nothing else uses it.
+struct ModelSweep: ViewModifier {
 
     /// Changing this value runs the sweep once.
     let trigger: String
@@ -98,9 +97,9 @@ struct GeminiSweep: ViewModifier {
 }
 
 extension View {
-    /// Sweeps the Gemini gradient across this view once whenever `trigger`
+    /// Sweeps the accent gradient across this view once whenever `trigger`
     /// changes to a non-empty value.
-    func geminiSweep(trigger: String) -> some View {
-        modifier(GeminiSweep(trigger: trigger))
+    func modelSweep(trigger: String) -> some View {
+        modifier(ModelSweep(trigger: trigger))
     }
 }

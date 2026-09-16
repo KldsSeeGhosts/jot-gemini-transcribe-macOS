@@ -38,7 +38,7 @@ public final class AudioCaptureEngine: AudioCapturing {
     /// reassigned mid-session — see the note on `AudioCapturing.start`.
     private var pcmSink: (@Sendable (Data) -> Void)?
     private let targetFormat = AVAudioFormat(
-        commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true
+        commonFormat: .pcmFormatInt16, sampleRate: 24_000, channels: 1, interleaved: true
     )!
 
     private var engine: AVAudioEngine?
@@ -76,7 +76,7 @@ public final class AudioCaptureEngine: AudioCapturing {
     private var levelSampleCount = 0
     private var peakLevel: Float = 0
     /// The authoritative peak: computed on the WRITE queue from the converted
-    /// buffer, which is 16kHz mono Int16 by construction. No hardware change, no
+    /// buffer, which is 24kHz mono Int16 by construction. No hardware change, no
     /// voice-processing format, and no aggregate device can ever blind it — which
     /// is what makes the tap-path metering failure survivable rather than fatal.
     private var writtenPeakLevel: Float = 0
@@ -187,10 +187,7 @@ public final class AudioCaptureEngine: AudioCapturing {
         let (frames, gaps, peak, writtenPeak, metered, written) = withStateLock {
             (framesWritten, gapMarkers, peakLevel, writtenPeakLevel, meteringDidRun, writtenPeakDidRun)
         }
-        // Migration evidence: gate on the tap peak, log both, flip only when real
-        // sessions say they agree. The 16kHz resample drops everything above 8kHz
-        // so they should track closely — but "should" is not how you move a
-        // threshold that discards recordings.
+        // Migration evidence: gate on the tap peak and log both measurements.
         if metered, written {
             Log.audio.info("peak tap=\(peak, format: .fixed(precision: 3)) written=\(writtenPeak, format: .fixed(precision: 3)) delta=\(writtenPeak - peak, format: .fixed(precision: 3))")
         }
@@ -260,7 +257,7 @@ public final class AudioCaptureEngine: AudioCapturing {
         self.engine = engine
         let input = engine.inputNode
 
-        // Tap at the hardware format; conversion to 16k mono happens on our queue.
+        // Tap at the hardware format; conversion to 24k mono happens on our queue.
         let hwFormat = input.outputFormat(forBus: 0)
         guard hwFormat.sampleRate > 0, hwFormat.channelCount > 0 else {
             throw CaptureError.noInputDevice

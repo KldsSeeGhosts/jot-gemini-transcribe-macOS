@@ -41,7 +41,7 @@ final class PillModel: ObservableObject {
     /// gets inserted.
     @Published var partial: String = ""
     /// Changes once per dictation, when the finished transcript replaces the
-    /// running guess. Drives the Gemini sweep.
+    /// running guess. Drives the correction sweep.
     @Published var corrected: String = ""
     /// The kept/cut runs to animate. Empty means show plain text.
     @Published var correction: [TranscriptDiff.Segment] = []

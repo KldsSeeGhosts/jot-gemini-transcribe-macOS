@@ -2,26 +2,26 @@
 
 ## The promise
 
-Your voice goes from your Mac directly to Google's Gemini API, using your own API
-key. There is no middleman server, no account, no analytics, no telemetry.
+Your voice goes from your Mac directly to the OpenAI API, using your own API
+key. There is no middleman server, no app account, no analytics, no telemetry.
 Everything else stays on your Mac. The code is open — verify all of this.
 
 ## What leaves your machine (the complete list)
 
-1. **The audio of each dictation** (FLAC-compressed), sent to
-   `generativelanguage.googleapis.com` — the only network host this app talks to.
+1. **The audio of each dictation**, sent to `api.openai.com`, the only network
+   host this app talks to. Live mode streams 24 kHz PCM. The fallback and
+   recovery path uploads an M4A copy made from the saved CAF.
 2. **Your dictionary terms**, alongside that audio. The transcription model uses
    them to bias what it hears, which is why names and jargon come out spelled
    right as you speak rather than being corrected afterwards. Only the correct
    spellings are sent — never the misspellings you record. They ride on every
    dictation, including with Smart transcription off.
-3. **The formatting prompt**, *only if* "Match tone to the app you're in" is on
-   in Settings → Dictation — off by default. It contains the transcript being
-   formatted, the formatting rules, a coarse tone category derived from the
-   frontmost app's *category* (e.g. "chat message"), and your dictionary terms.
-   With that setting off, your transcript text never leaves this Mac at all.
-   Never window contents, never screenshots, never surrounding text.
-4. **Your API key**, in the request header to Google only. It is stored in the
+3. **The formatting prompt**, when Smart transcription or "Match tone to the app
+   you're in" is on. Smart transcription is on by default. It contains the raw
+   transcript, formatting rules, and dictionary terms. Tone matching also adds a
+   coarse category derived from the target app, such as "chat message". It never
+   contains window contents, screenshots, or surrounding text.
+4. **Your API key**, in the request header to OpenAI only. It is stored in the
    macOS Keychain, never in files or preferences.
 
 ## What never leaves
@@ -29,9 +29,9 @@ Everything else stays on your Mac. The code is open — verify all of this.
 - Your history database and stored recordings — audio and transcript text leave
   only as part of the requests above, never in bulk and never anywhere else
 - Your dictionary as a file. Individual terms ride with the audio as described
-  above, and your misspelling rules are included in the formatting prompt *only*
-  when tone matching is on — with it off (the default) they never leave. The
-  store itself, and everything you have not dictated against, stays on this Mac
+  above, and your misspelling rules are included in the formatting prompt when
+  Smart transcription or tone matching is on. The store itself, and everything
+  you have not dictated against, stays on this Mac
 - Which apps you use, when you dictate, or anything you type
 - Keystrokes: the event tap watches your dictation key, plus — only while a
   dictation is active — Esc (cancel), Space (the hands-free gesture), and the
@@ -50,12 +50,11 @@ Everything else stays on your Mac. The code is open — verify all of this.
 - Local files are protected by FileVault if enabled; they are not separately
   encrypted (stated honestly).
 
-## Google's side of the wire
+## OpenAI's side of the wire
 
-Your audio is governed by your own Gemini API terms with Google. As of writing,
-paid-tier API usage is not used for model training; free-tier usage may be. That
-relationship is yours — this app doesn't broker it. Review the
-[Gemini API terms](https://ai.google.dev/gemini-api/terms).
+Your requests are governed by the terms and data controls of your own OpenAI API
+account. Jot does not broker that relationship. Review OpenAI's current
+[API data usage documentation](https://platform.openai.com/docs/guides/your-data).
 
 ## Secure input
 
@@ -67,5 +66,5 @@ the clipboard.
 
 - Build from source (`./scripts/build.sh`).
 - Watch traffic with Little Snitch or `nettop` — you'll see exactly one host.
-- Read the prompt: it's a source file — note it governs only the optional tone pass; with that off, formatting happens inside Google's transcription model and there is no local prompt to read
+- Read the cleanup prompt used by Smart transcription and tone matching
   ([PromptV1.swift](../JotCore/Sources/FormattingPipeline/PromptV1.swift)).

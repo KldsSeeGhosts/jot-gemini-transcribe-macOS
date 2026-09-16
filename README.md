@@ -4,7 +4,7 @@
 
 # Jot
 
-**[Gemini 3.5 Transcribe](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe) Demo. Hold a key. Speak. It types.**
+**OpenAI-powered dictation for macOS. Hold a key. Speak. It types.**
 
 Smart dictation for macOS that puts polished text wherever your cursor is.
 
@@ -12,7 +12,7 @@ Smart dictation for macOS that puts polished text wherever your cursor is.
 
 </div>
 
-This is not an officially supported Google product.
+This is an independent project and is not an official OpenAI product.
 
 ---
 
@@ -51,7 +51,7 @@ Every failure is retryable from History. Release the key mid-word and it keeps
 listening until you actually stop.
 
 **It is private by architecture.** Your voice goes from your Mac straight to the
-Gemini API with *your* key. No middleman server, no account, no analytics, no
+OpenAI API with *your* key. No middleman server, no app account, no analytics, no
 screenshots, no keystroke logging — one network host, and you can read every
 line of the code that talks to it. See [PRIVACY.md](docs/PRIVACY.md).
 
@@ -73,27 +73,25 @@ email vs. chat vs. code is available too, in Settings → Dictation.
 
 Setup takes about two minutes and the app walks you through it:
 
-1. **Paste a Gemini API key** — get one at
-   [Google AI Studio](https://aistudio.google.com/apikey). It is stored in your
-   macOS Keychain and only ever sent to Google.
+1. **Paste an OpenAI API key** — get one from the
+   [OpenAI API dashboard](https://platform.openai.com/api-keys). It is stored in
+   your macOS Keychain and only ever sent to OpenAI.
 2. **Allow the microphone** — say hello and it advances by itself.
 3. **Allow Accessibility** — macOS requires this for any app that types into
    another app.
 4. **Hold `fn` and talk.**
 
-**Cost:** you pay Google for what you dictate at
-[Gemini API pricing](https://ai.google.dev/pricing); a free tier exists and a
-typical dictation is a few seconds of audio. Jot itself is free and has no
-account.
+**Cost:** you pay OpenAI for API usage under your own account. A typical
+dictation is only a few seconds of audio. Jot itself is free and has no account.
 
-**Model:** Jot runs on Gemini's specialist transcription model,
-`gemini-3.5-transcribe`. Your key needs access to it; setup tells you up front if
-it does not, instead of failing on your first dictation.
+**Models:** recorded audio uses `gpt-transcribe`; live dictation uses
+`gpt-live-transcribe`. Smart cleanup defaults to `gpt-5-mini`. You can override
+the recorded-audio and cleanup models in Settings.
 
 ## How it works
 
 ```
-fn down ─▶ capture (CAF on disk from t=0) ─▶ fn up ─▶ FLAC ─▶ Gemini transcribe
+fn down ─▶ capture (CAF on disk from t=0) ─▶ fn up ─▶ M4A ─▶ OpenAI transcribe
                                                                     │
    cursor ◀─ insert (AX → paste → clipboard) ◀─ [validate ◀─ tone pass] ─┘
                                               (optional, off by default)
@@ -144,7 +142,7 @@ App/            menu bar item, HUD pill, windows, design tokens, icon + sounds
 JotCore/        all engine logic, headless and testable
   HotkeyEngine/     CGEventTap + the pure hold/lock/cancel grammar
   AudioEngine/      crash-safe CAF capture, device changes, prewarming
-  TranscriptionClient/  Gemini calls, timeouts, retries, FLAC
+  TranscriptionClient/  OpenAI calls, Realtime socket, retries, M4A
   FormattingPipeline/   cleanup prompt, validation gate, dictionary rules
   InsertionEngine/      the AX → paste → clipboard ladder
   HistoryStore/         GRDB index, recovery, retry queue, retention

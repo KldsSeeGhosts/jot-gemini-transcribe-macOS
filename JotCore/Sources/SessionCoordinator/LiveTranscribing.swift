@@ -61,16 +61,19 @@ public final class LiveTranscriber: LiveTranscribing, @unchecked Sendable {
 
     private let session: LiveTranscriptionSession
     private let replacementRules: @Sendable () -> [ReplacementEngine.Rule]
+    private let postProcess: (@Sendable (String) async -> String)?
     private let modelID: String
     private let stats: LiveStats
 
     public init(session: LiveTranscriptionSession,
                 modelID: String,
                 replacementRules: @escaping @Sendable () -> [ReplacementEngine.Rule],
+                postProcess: (@Sendable (String) async -> String)? = nil,
                 stats: LiveStats = LiveStats()) {
         self.session = session
         self.modelID = modelID
         self.replacementRules = replacementRules
+        self.postProcess = postProcess
         self.stats = stats
     }
 
@@ -120,7 +123,12 @@ public final class LiveTranscriber: LiveTranscribing, @unchecked Sendable {
         // lookarounds, so a multi-word rule split across a chunk boundary would
         // never fire and the trailing lookahead would misfire at a chunk edge.
         stats.recordSuccess()
-        let corrected = ReplacementEngine.apply(replacementRules(), to: text)
+        let corrected: String
+        if let postProcess {
+            corrected = await postProcess(text)
+        } else {
+            corrected = ReplacementEngine.apply(replacementRules(), to: text)
+        }
         return TranscriptionResult(rawTranscript: text, cleanedTranscript: corrected, modelID: modelID)
     }
 

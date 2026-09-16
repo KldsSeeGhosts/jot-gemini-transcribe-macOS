@@ -49,7 +49,7 @@ final class DictationController {
     /// experimental and off by default.
     ///
     /// It lives here rather than in JotCore because it is the one place that
-    /// needs both the Keychain and the Dictionary, and the coordinator should
+    /// needs both OAuth authentication and the Dictionary, and the coordinator should
     /// know about neither.
     @MainActor
     private static func makeLiveSession(context: DictationContext) -> LiveTranscribing? {
@@ -67,38 +67,35 @@ final class DictationController {
             )
             return nil
         }
-        guard let key = KeychainStore.loadAPIKey(), !key.isEmpty else { return nil }
+        guard OpenAIOAuthStore.hasLocalLogin() else { return nil }
         let dictionary = DictionaryStore()
         let config = settings.openAIConfig
+        let oauth = OpenAIOAuthStore()
         let session = LiveTranscriptionSession(
-            transport: WebSocketTransport(apiKey: { key }),
+            transport: WebSocketTransport(authHeaders: {
+                try await oauth.authorizationHeaders()
+            }),
             setup: LiveSetup(
                 model: config.liveModel,
+                prompt: OpenAITranscriptionService.transcriptionPrompt(
+                    settings: settings,
+                    context: context,
+                    dictionary: dictionary
+                ),
                 // The same terms the batch path biases with, so switching modes
                 // does not quietly change how someone's name gets spelled.
                 customVocabulary: dictionary.sanitizedVocabulary()
             )
         )
-        let cleanupClient = OpenAIClient(apiKey: { key })
-        let cleanupService = OpenAITranscriptionService(client: cleanupClient)
-        let usesCleanup = settings.smartTranscriptionEnabled
-            || settings.smartCleanupPassEnabled
         return LiveTranscriber(
             session: session,
-            modelID: usesCleanup
-                ? "\(config.liveModel)+\(config.cleanupModel)"
-                : config.liveModel,
-            replacementRules: { DictionaryStore().replacementRules() },
-            postProcess: { raw in
-                await cleanupService.clean(raw: raw, context: context)
-            }
+            modelID: config.liveModel,
+            replacementRules: { DictionaryStore().replacementRules() }
         )
     }
 
     init() {
-        KeychainStore.migrateDevKeyFileIfPresent()
-        let client = OpenAIClient(apiKey: { KeychainStore.loadAPIKey() })
-        let service = OpenAITranscriptionService(client: client)
+        let service = OpenAITranscriptionService()
         transcriptionService = service
         historyStore = try? HistoryStore.standard()
         coordinator = DictationCoordinator(
@@ -126,7 +123,7 @@ final class DictationController {
     private var needsOnboarding: Bool {
         // A deliberate "I'll add it later" is remembered — the wizard must not
         // re-trap that user every launch; the menu bar carries the key nudge.
-        (KeychainStore.loadAPIKey() == nil && !SettingsStore().hasCompletedOnboarding)
+        (!OpenAIOAuthStore.hasLocalLogin() && !SettingsStore().hasCompletedOnboarding)
             || !AXIsProcessTrusted()
             || AVCaptureDevice.authorizationStatus(for: .audio) != .authorized
     }
@@ -239,9 +236,8 @@ final class DictationController {
     private func activateEngine() {
         if engine.start() {
             engineActive = true
-            if KeychainStore.loadAPIKey() == nil {
-                // New-user path: dictation can't work yet — say exactly where to go.
-                onStatusChange?("Add your OpenAI API key in Settings → Advanced")
+            if !OpenAIOAuthStore.hasLocalLogin() {
+                onStatusChange?("Sign in to OpenAI with Pi or Codex")
                 onStatusItemState?(.attention)
             } else {
                 onStatusChange?("Ready — hold \(SettingsStore().hotkeyKey.displayName) to dictate")
@@ -305,7 +301,7 @@ final class DictationController {
         } else if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
             onStatusChange?("Allow microphone access in System Settings to dictate")
         } else {
-            onStatusChange?("Add your OpenAI API key in Settings → Advanced")
+            onStatusChange?("Sign in to OpenAI with Pi or Codex")
         }
         onStatusItemState?(.attention)
     }
@@ -328,7 +324,7 @@ final class DictationController {
             applyHotkeySettings()
             // The menu-bar status line names the key — keep it truthful, but
             // never overwrite an attention message ("Grant Accessibility…").
-            if engineActive, KeychainStore.loadAPIKey() != nil {
+            if engineActive, OpenAIOAuthStore.hasLocalLogin() {
                 onStatusChange?("Ready — hold \(SettingsStore().hotkeyKey.displayName) to dictate")
             }
         case "accessibility":
@@ -336,15 +332,15 @@ final class DictationController {
             if !engineActive {
                 activateEngine()
             }
-        case "apiKey":
-            if KeychainStore.loadAPIKey() != nil {
+        case "oauth":
+            if OpenAIOAuthStore.hasLocalLogin() {
                 // Covers the "I'll add it later" onboarding path, where the
                 // engine was never started: a key arriving in Settings must
                 // bring the whole app to life, not just flip a badge.
                 // engine.start() is reentrant; hud.show() is idempotent.
                 activateEngine()
             } else {
-                onStatusChange?("Add your OpenAI API key in Settings → Advanced")
+                onStatusChange?("Sign in to OpenAI with Pi or Codex")
                 onStatusItemState?(.attention)
             }
         default:
@@ -388,7 +384,7 @@ final class DictationController {
         queue.onDrainBlocked = { [weak self] error in
             let message: String
             if case .auth = error {
-                message = "Queued dictations are waiting — fix your API key in Settings → Advanced"
+                message = "Queued dictations are waiting — renew your OpenAI login"
             } else {
                 message = "Daily quota reached — queued dictations will retry later"
             }
@@ -868,17 +864,17 @@ final class DictationController {
         switch failure {
         case .network: return "Couldn't reach OpenAI — saved to History"
         case .auth:
-            return KeychainStore.loadAPIKey() == nil
-                ? "Add your OpenAI API key in Settings — recording saved to History"
-                : "API key isn't working — saved to History"
+            return OpenAIOAuthStore.hasLocalLogin()
+                ? "OpenAI login expired — saved to History"
+                : "Sign in to OpenAI with Pi or Codex — recording saved to History"
         case .modelAccess:
             return SettingsStore().transcribeModelOverride != nil
-                ? "That model isn't available to your key — check Settings → Advanced. Saved to History"
-                : "Your key can't use the transcription model yet — recording saved to History"
+                ? "That model isn't available to your account — check Settings → Advanced. Saved to History"
+                : "Your OpenAI account can't use the transcription model yet — recording saved to History"
         case .badRequest: return "OpenAI rejected the request — saved to History"
         case .rateLimited: return "Rate limited — History will retry it shortly"
         case .noMicrophone: return "No microphone found — connect one to dictate"
-        case .quotaExhausted: return "API quota reached for your key — check the OpenAI dashboard. Saved to History"
+        case .quotaExhausted: return "OpenAI usage limit reached — saved to History"
         case .timeout: return "Timed out — saved to History"
         case .validation: return "Couldn't transcribe — saved to History"
         case .safetyBlocked: return "The API declined this one — saved to History"

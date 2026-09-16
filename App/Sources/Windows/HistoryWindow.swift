@@ -255,7 +255,7 @@ struct HistoryPane: View {
         case .failed where record.errorCode == "tooNoisy":
             return "Too noisy — no speech heard"
         case .failed where record.errorCode == "bad_request": return "Couldn't process this one"
-        case .failed where record.errorCode == "model": return "Model not available to your key — see Settings → Advanced"
+        case .failed where record.errorCode == "model": return "Model not available to your account — see Settings → Advanced"
         case .failed: return "Transcription failed"
         default: return "Recovered recording"
         }

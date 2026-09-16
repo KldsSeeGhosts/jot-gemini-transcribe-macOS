@@ -20,13 +20,15 @@ public final class WebSocketTransport: LiveTransport, @unchecked Sendable {
 
     public static let endpoint = "wss://api.openai.com/v1/realtime?intent=transcription"
 
-    private let apiKey: @Sendable () -> String
+    private let authHeaders: @Sendable () async throws -> [String: String]
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
     private let lock = NSLock()
 
-    public init(apiKey: @escaping @Sendable () -> String) {
-        self.apiKey = apiKey
+    public init(
+        authHeaders: @escaping @Sendable () async throws -> [String: String]
+    ) {
+        self.authHeaders = authHeaders
         let config = URLSessionConfiguration.ephemeral
         // Fail fast rather than parking. `waitsForConnectivity` would leave an
         // offline dictation holding an unresolved connection for its whole
@@ -39,7 +41,9 @@ public final class WebSocketTransport: LiveTransport, @unchecked Sendable {
 
     public func connect() async throws {
         var request = URLRequest(url: URL(string: Self.endpoint)!)
-        request.setValue("Bearer \(apiKey())", forHTTPHeaderField: "Authorization")
+        for (name, value) in try await authHeaders() {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
         let task = session.webSocketTask(with: request)
         withTask { $0 = task }
         task.resume()
@@ -48,7 +52,7 @@ public final class WebSocketTransport: LiveTransport, @unchecked Sendable {
     public func send(_ data: Data) async throws {
         let task = withTask { $0 }
         guard let task else { throw LiveError.setupTimedOut }
-        try await task.send(.data(data))
+        try await task.send(.string(String(decoding: data, as: UTF8.self)))
     }
 
     public func receive() async throws -> Data {

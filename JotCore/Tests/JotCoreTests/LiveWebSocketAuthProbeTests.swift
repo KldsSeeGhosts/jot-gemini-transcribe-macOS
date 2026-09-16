@@ -18,15 +18,17 @@ import XCTest
 
 /// Opt-in probe for the exact WebSocket authentication and setup used by Jot.
 ///
-/// JOT_LIVE_PROBE=1 OPENAI_API_KEY=... swift test
+/// JOT_LIVE_PROBE=1 swift test
 ///   --filter LiveWebSocketAuthProbeTests
 final class LiveWebSocketAuthProbeTests: XCTestCase {
-    func testOpenAIRealtimeAcceptsAuthorizationHeaderAndSetup() async throws {
+    func testOpenAIRealtimeAcceptsLocalOAuthAndSetup() async throws {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["JOT_LIVE_PROBE"] == "1", "live probe not opted in")
-        let key = try XCTUnwrap(env["OPENAI_API_KEY"])
 
-        let transport = WebSocketTransport(apiKey: { key })
+        let oauth = OpenAIOAuthStore()
+        let transport = WebSocketTransport(authHeaders: {
+            try await oauth.authorizationHeaders()
+        })
         defer { transport.close() }
         try await transport.connect()
         try await transport.send(LiveProtocol.setupFrame(LiveSetup()))

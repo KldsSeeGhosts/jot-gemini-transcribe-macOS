@@ -15,8 +15,8 @@
 import Foundation
 
 public extension Notification.Name {
-    /// Posted after any SettingsStore write and after Keychain API-key writes,
-    /// with `object` = the key ("showIdleIndicator", "apiKey", …). Runtime
+    /// Posted after any SettingsStore write and OAuth-status refresh,
+    /// with `object` = the key ("showIdleIndicator", "oauth", …). Runtime
     /// surfaces that render a setting (pill, status line, hotkey engine) observe
     /// this so toggles take effect the moment they're flipped — never "on the
     /// next unrelated transition". (gateTrips bookkeeping is exempt: nothing
@@ -163,9 +163,8 @@ public struct SettingsStore: Sendable {
         Self.set(enabled, forKey: "smartTranscription")
     }
 
-    /// The opt-in second pass through the cleanup model — this is what carries
-    /// per-app tone. Off by default: it costs a round trip and sends the
-    /// transcript text a second time.
+    /// Adds a coarse per-app tone instruction to the Realtime transcription
+    /// prompt. No second model call is made.
     public var smartCleanupPassEnabled: Bool {
         Self.defaults.object(forKey: "smartCleanupPass") as? Bool ?? false
     }

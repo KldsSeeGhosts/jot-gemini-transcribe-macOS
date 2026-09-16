@@ -17,57 +17,41 @@ import XCTest
 
 /// Opt-in checks against the OpenAI API.
 ///
-/// JOT_LIVE_PROBE=1 OPENAI_API_KEY=... JOT_PROBE_AUDIO=/path/to/clip.m4a \
+/// JOT_LIVE_PROBE=1 JOT_PROBE_AUDIO=/path/to/24khz-mono-int16.caf \
 ///   ./scripts/test.sh --filter LiveInteractionsProbeTests
 final class LiveInteractionsProbeTests: XCTestCase {
-    private func requireOptIn() throws -> (OpenAIClient, Data, OpenAIConfig) {
+    private func requireOptIn() throws -> URL {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["JOT_LIVE_PROBE"] == "1", "live probe not opted in")
-        let key = try XCTUnwrap(env["OPENAI_API_KEY"])
         let path = try XCTUnwrap(env["JOT_PROBE_AUDIO"])
         try XCTSkipUnless(
             FileManager.default.fileExists(atPath: path),
             "JOT_PROBE_AUDIO does not exist: \(path)"
         )
-        return (
-            OpenAIClient(apiKey: { key }),
-            try Data(contentsOf: URL(fileURLWithPath: path)),
-            OpenAIConfig()
-        )
+        return URL(fileURLWithPath: path)
     }
 
-    func testRecordedAudioTranscribesThroughShippingClient() async throws {
-        let (client, audio, config) = try requireOptIn()
-        let text = try await client.transcribe(
-            audioData: audio,
-            model: config.transcribeModel,
-            endpoint: config.endpoint,
-            deadline: 60,
-            prompt: nil,
-            keywords: []
+    func testSavedAudioTranscribesThroughOAuthRealtime() async throws {
+        let audioURL = try requireOptIn()
+        let service = OpenAITranscriptionService()
+        let result = try await service.transcribe(
+            audioURL: audioURL,
+            durationSeconds: 3,
+            context: DictationContext()
         )
-        XCTAssertFalse(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        print("TRANSCRIPT: \(text)")
+        XCTAssertFalse(
+            result.cleanedTranscript
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+        )
+        print("TRANSCRIPT: \(result.cleanedTranscript)")
     }
 
-    func testBadKeyIsRejected() async throws {
-        try XCTSkipUnless(
-            ProcessInfo.processInfo.environment["JOT_LIVE_PROBE"] == "1",
-            "live probe not opted in"
-        )
-        let client = OpenAIClient(apiKey: { "definitely-not-a-real-key" })
-        let check = await client.validateKey(endpoint: OpenAIConfig().endpoint)
-        guard case .rejected = check else {
-            return XCTFail("a rejected key must not be classified as unreachable")
-        }
-    }
-
-    func testRealKeyValidates() async throws {
+    func testLocalOAuthSessionResolvesHeaders() async throws {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["JOT_LIVE_PROBE"] == "1", "live probe not opted in")
-        let key = try XCTUnwrap(env["OPENAI_API_KEY"])
-        let client = OpenAIClient(apiKey: { key })
-        let check = await client.validateKey(endpoint: OpenAIConfig().endpoint)
-        XCTAssertEqual(check, .valid)
+        let headers = try await OpenAIOAuthStore().authorizationHeaders()
+        XCTAssertTrue(headers["Authorization"]?.hasPrefix("Bearer ") == true)
+        XCTAssertFalse(headers["chatgpt-account-id"]?.isEmpty ?? true)
     }
 }

@@ -18,11 +18,29 @@ import Foundation
 /// user's hotkey, history, dictionary, retention, and UI preferences.
 public enum OpenAIProviderMigration {
     private static let flag = "didMigrateToOpenAIProvider"
+    private static let oauthFlag = "didMigrateToOpenAIOAuth"
 
     public static func runIfNeeded() {
         let defaults = UserDefaults.standard
-        guard !defaults.bool(forKey: flag) else { return }
+        if !defaults.bool(forKey: flag) {
+            resetProviderOverrides(in: defaults)
+            defaults.set(true, forKey: flag)
+            Log.session.info("OpenAIProviderMigration: provider-specific settings reset")
+        }
 
+        guard !defaults.bool(forKey: oauthFlag) else { return }
+        // OAuth is the only shipping authentication path. Remove a key saved by
+        // the brief API-key build so the app cannot silently fall back to billed
+        // Platform API usage.
+        LegacyAPIKeyCleanup.run()
+        if !OpenAIOAuthStore.hasLocalLogin() {
+            defaults.set(false, forKey: "hasCompletedOnboarding")
+        }
+        defaults.set(true, forKey: oauthFlag)
+        Log.session.info("OpenAIProviderMigration: switched authentication to local OAuth")
+    }
+
+    private static func resetProviderOverrides(in defaults: UserDefaults) {
         if let endpoint = defaults.string(forKey: "endpointOverride"),
            endpoint.localizedCaseInsensitiveContains("google") {
             defaults.removeObject(forKey: "endpointOverride")
@@ -41,10 +59,8 @@ public enum OpenAIProviderMigration {
         }
         defaults.removeObject(forKey: "legacyTranscribeEndpoint")
 
-        if KeychainStore.loadAPIKey() == nil {
+        if !OpenAIOAuthStore.hasLocalLogin() {
             defaults.set(false, forKey: "hasCompletedOnboarding")
         }
-        defaults.set(true, forKey: flag)
-        Log.session.info("OpenAIProviderMigration: provider-specific settings reset")
     }
 }

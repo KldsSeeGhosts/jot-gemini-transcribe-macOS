@@ -35,11 +35,14 @@ public enum LiveEvent: Equatable, Sendable {
 /// Everything that varies per session.
 public struct LiveSetup: Equatable, Sendable {
     public var model: String
+    public var prompt: String?
     public var customVocabulary: [String]
 
-    public init(model: String = "gpt-live-transcribe",
+    public init(model: String = "gpt-transcribe",
+                prompt: String? = nil,
                 customVocabulary: [String] = []) {
         self.model = model
+        self.prompt = prompt
         self.customVocabulary = customVocabulary
     }
 }
@@ -52,10 +55,10 @@ public enum LiveProtocol {
 
     /// The ONLY place a live setup frame is constructed.
     public static func setupFrame(_ setup: LiveSetup) -> Data {
-        var transcription: [String: Any] = [
-            "model": setup.model,
-            "delay": "low",
-        ]
+        var transcription: [String: Any] = ["model": setup.model]
+        if let prompt = setup.prompt, !prompt.isEmpty {
+            transcription["prompt"] = prompt
+        }
         if !setup.customVocabulary.isEmpty {
             transcription["keywords"] = setup.customVocabulary
         }

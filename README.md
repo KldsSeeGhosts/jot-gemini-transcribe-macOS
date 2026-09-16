@@ -51,8 +51,9 @@ Every failure is retryable from History. Release the key mid-word and it keeps
 listening until you actually stop.
 
 **It is private by architecture.** Your voice goes from your Mac straight to the
-OpenAI API with *your* key. No middleman server, no app account, no analytics, no
-screenshots, no keystroke logging — one network host, and you can read every
+OpenAI Realtime API with your existing OAuth login. No middleman server, no app
+account, no analytics, no screenshots, no keystroke logging — one network host,
+and you can read every
 line of the code that talks to it. See [PRIVACY.md](docs/PRIVACY.md).
 
 **Your jargon, spelled right.** Names and product terms go in the Dictionary and
@@ -73,28 +74,27 @@ email vs. chat vs. code is available too, in Settings → Dictation.
 
 Setup takes about two minutes and the app walks you through it:
 
-1. **Paste an OpenAI API key** — get one from the
-   [OpenAI API dashboard](https://platform.openai.com/api-keys). It is stored in
-   your macOS Keychain and only ever sent to OpenAI.
+1. **Use your OpenAI login** — Jot reuses the local OAuth session created by
+   [Pi](https://github.com/badlogic/pi-mono) or Codex. Run `pi` or `codex login`
+   once and sign in with ChatGPT. Jot does not ask for an API key.
 2. **Allow the microphone** — say hello and it advances by itself.
 3. **Allow Accessibility** — macOS requires this for any app that types into
    another app.
 4. **Hold `fn` and talk.**
 
-**Cost:** you pay OpenAI for API usage under your own account. A typical
-dictation is only a few seconds of audio. Jot itself is free and has no account.
+**Access:** transcription uses the same ChatGPT-managed Codex OAuth entitlement
+as the local Pi/Codex session. Jot itself has no account.
 
-**Models:** recorded audio uses `gpt-transcribe`; live dictation uses
-`gpt-live-transcribe`. Smart cleanup defaults to `gpt-5-mini`. You can override
-the recorded-audio and cleanup models in Settings.
+**Model:** both live dictation and saved-recording recovery use
+`gpt-transcribe` through OpenAI Realtime. You can override the model in
+Settings.
 
 ## How it works
 
 ```
-fn down ─▶ capture (CAF on disk from t=0) ─▶ fn up ─▶ M4A ─▶ OpenAI transcribe
-                                                                    │
-   cursor ◀─ insert (AX → paste → clipboard) ◀─ [validate ◀─ tone pass] ─┘
-                                              (optional, off by default)
+fn down ─▶ capture (CAF on disk from t=0) ─▶ OpenAI Realtime transcription
+                                                        │
+   cursor ◀─ insert (AX → paste → clipboard) ◀─ local dictionary rules
                                                     │
                                               History (SQLite)
 ```
@@ -142,7 +142,7 @@ App/            menu bar item, HUD pill, windows, design tokens, icon + sounds
 JotCore/        all engine logic, headless and testable
   HotkeyEngine/     CGEventTap + the pure hold/lock/cancel grammar
   AudioEngine/      crash-safe CAF capture, device changes, prewarming
-  TranscriptionClient/  OpenAI calls, Realtime socket, retries, M4A
+  TranscriptionClient/  OAuth-backed OpenAI Realtime, saved-audio replay, retries
   FormattingPipeline/   cleanup prompt, validation gate, dictionary rules
   InsertionEngine/      the AX → paste → clipboard ladder
   HistoryStore/         GRDB index, recovery, retry queue, retention

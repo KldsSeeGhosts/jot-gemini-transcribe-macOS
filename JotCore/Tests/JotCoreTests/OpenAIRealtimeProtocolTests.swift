@@ -5,56 +5,18 @@
 // You may obtain a copy of the License at
 //
 //     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 import XCTest
 @testable import JotCore
 
-final class OpenAIClientTests: XCTestCase {
-    func testExtractsFileTranscript() throws {
-        let data = Data(#"{"text":"Ship it Friday.","languages":[{"code":"en"}]}"#.utf8)
-        XCTAssertEqual(
-            try OpenAIClient.extractTranscript(from: data),
-            "Ship it Friday."
-        )
-    }
-
-    func testExtractsResponsesOutputText() throws {
-        let data = Data("""
-        {
-          "output": [{
-            "type": "message",
-            "content": [
-              {"type": "output_text", "text": "Let's meet at 3."}
-            ]
-          }]
-        }
-        """.utf8)
-        XCTAssertEqual(
-            try OpenAIClient.extractResponseText(from: data),
-            "Let's meet at 3."
-        )
-    }
-
-    func testExtractsOpenAIErrorEnvelope() {
-        let data = Data("""
-        {"error":{"message":"Incorrect API key provided","type":"invalid_request_error","code":"invalid_api_key"}}
-        """.utf8)
-        XCTAssertEqual(
-            OpenAIClient.errorMessage(from: data),
-            "Incorrect API key provided"
-        )
-        XCTAssertEqual(OpenAIClient.errorCode(from: data), "invalid_api_key")
-    }
-
+final class OpenAIRealtimeProtocolTests: XCTestCase {
     func testRealtimeSetupUsesDocumentedAudioFormatAndManualTurns() throws {
         let data = LiveProtocol.setupFrame(
-            LiveSetup(model: "gpt-live-transcribe", customVocabulary: ["Caelestia"])
+            LiveSetup(
+                model: "gpt-transcribe",
+                prompt: "Transcribe faithfully.",
+                customVocabulary: ["Caelestia"]
+            )
         )
         let root = try XCTUnwrap(
             JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -69,8 +31,10 @@ final class OpenAIClientTests: XCTestCase {
         XCTAssertEqual(format["rate"] as? Int, 24_000)
         XCTAssertTrue(input["turn_detection"] is NSNull)
         let transcription = try XCTUnwrap(input["transcription"] as? [String: Any])
-        XCTAssertEqual(transcription["model"] as? String, "gpt-live-transcribe")
+        XCTAssertEqual(transcription["model"] as? String, "gpt-transcribe")
+        XCTAssertEqual(transcription["prompt"] as? String, "Transcribe faithfully.")
         XCTAssertEqual(transcription["keywords"] as? [String], ["Caelestia"])
+        XCTAssertNil(transcription["delay"])
     }
 
     func testRealtimeDecoderHandlesDeltaAndFinal() {

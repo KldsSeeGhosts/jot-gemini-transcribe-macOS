@@ -323,7 +323,7 @@ struct DictationPane: View {
                         settings.setSmartTranscription(enabled)
                     }
             } footer: {
-                Text("Removes filler words and applies self-corrections after transcription. Off = word for word, unless tone matching below is on.")
+                Text("Guides the transcription model to remove filler words and apply immediate self-corrections. Off = word for word, unless tone matching below is on.")
             }
 
             Section {
@@ -348,7 +348,7 @@ struct DictationPane: View {
                 Text("Experimental")
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Tone runs a second model over the transcript so email reads like email and chat like chat. Loud rooms judges your voice against the room noise. Live streams your voice as you speak and falls back to the saved recording if the connection fails. All are off by default.")
+                    Text("Tone guides the transcription style for email, chat, or code. Loud rooms judges your voice against the room noise. Live streams your voice as you speak and falls back by replaying the saved recording through Realtime. All are off by default.")
                     if let summary = LiveStats().summary {
                         Text(summary)
                     }
@@ -408,8 +408,8 @@ struct PrivacyPane: View {
             }
 
             Section {
-                LabeledContent("Audio") { Text("Sent to the OpenAI API with your key") }
-                LabeledContent("Transcript text") { Text("Sent again when Smart transcription or tone matching is on") }
+                LabeledContent("Audio") { Text("Sent to OpenAI Realtime using your local OAuth session") }
+                LabeledContent("Transcript text") { Text("Not sent in a separate cleanup request") }
                 LabeledContent("Dictionary terms") { Text("Sent with the audio, so names are spelled right as you speak") }
                 LabeledContent("Everything else") { Text("Never leaves this Mac") }
             } header: {
@@ -440,76 +440,48 @@ struct AdvancedPane: View {
     /// Placeholders derive from the REAL defaults — a hardcoded string went
     /// stale the day the preview model was retired (dogfood).
     private static let defaultConfig = OpenAIConfig()
-    @State private var apiKey = ""
-    @State private var keyStatus: KeyStatus = KeychainStore.loadAPIKey() == nil ? .missing : .stored
-    @State private var endpoint = SettingsStore().endpointOverride ?? ""
+    @State private var oauthSource = OpenAIOAuthStore.localLoginSource()
     @State private var transcribeModel = SettingsStore().transcribeModelOverride ?? ""
     @State private var liveModel = SettingsStore().liveModelOverride ?? ""
-    @State private var cleanupModel = SettingsStore().cleanupModelOverride ?? ""
 
-    enum KeyStatus { case missing, stored, validating, valid, invalid, saveFailed, savedOffline }
-
-    private var hasStoredKey: Bool { keyStatus == .stored || keyStatus == .valid || keyStatus == .savedOffline }
-
-    private var endpointLooksBroken: Bool {
-        // Same predicate the effective config uses — the warning and reality
-        // can never drift apart (SettingsStore.usableEndpointURL).
-        let trimmed = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !trimmed.isEmpty && SettingsStore.usableEndpointURL(trimmed) == nil
-    }
     var body: some View {
         Form {
             Section {
                 HStack {
-                    SecureField("API key", text: $apiKey,
-                                prompt: Text(hasStoredKey ? "••••••••  (stored in Keychain)" : "Paste your key"))
-                        .font(JotUI.TypeScale.code)
-                    keyStatusBadge
-                }
-                if keyStatus == .invalid, KeychainStore.loadAPIKey() != nil {
-                    Text("That key didn't work — your saved key is unchanged.")
-                        .font(JotUI.TypeScale.labelSmall())
+                    if let oauthSource {
+                        Label(
+                            "Signed in through \(oauthSource.rawValue)",
+                            systemImage: "checkmark.circle.fill"
+                        )
+                        .foregroundStyle(JotUI.Colors.success)
+                    } else {
+                        Label(
+                            "No local OpenAI login found",
+                            systemImage: "person.crop.circle.badge.exclamationmark"
+                        )
                         .foregroundStyle(JotUI.Colors.error)
+                    }
+                    Spacer()
+                    Button("Check again") {
+                        oauthSource = OpenAIOAuthStore.localLoginSource()
+                        NotificationCenter.default.post(
+                            name: .gtSettingDidChange,
+                            object: "oauth"
+                        )
+                    }
                 }
-                if keyStatus == .saveFailed {
-                    Text("The key validated but couldn't be saved to your Keychain — try again.")
-                        .font(JotUI.TypeScale.labelSmall())
-                        .foregroundStyle(JotUI.Colors.error)
-                }
-                if keyStatus == .savedOffline {
-                    Text("You look offline — key saved; it'll be checked on your first dictation.")
+                if oauthSource == nil {
+                    Text("Run `pi` or `codex login` in Terminal and sign in with ChatGPT.")
                         .font(JotUI.TypeScale.labelSmall())
                         .foregroundStyle(.secondary)
                 }
-                HStack {
-                    Button("Save & Validate") { saveAndValidate() }
-                        .disabled(apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
-                    if hasStoredKey {
-                        Button("Remove Key…", role: .destructive) { removeKey() }
-                    }
-                    Spacer()
-                    Link("Get a key from OpenAI", destination: URL(string: "https://platform.openai.com/api-keys")!)
-                        .font(JotUI.TypeScale.labelSmall())
-                }
             } header: {
-                Text("OpenAI API key")
+                Text("OpenAI account")
             } footer: {
-                Text("Stored in your Mac's Keychain and only ever sent to OpenAI.")
+                Text("Jot reuses your local Codex OAuth session. It does not store or request an API key.")
             }
 
             Section {
-                TextField("Endpoint", text: $endpoint,
-                          prompt: Text(Self.defaultConfig.endpoint.absoluteString))
-                    .font(JotUI.TypeScale.code)
-                    .onChange(of: endpoint) { _, value in
-                        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                        settings.setEndpointOverride(trimmed.isEmpty ? nil : trimmed)
-                    }
-                if endpointLooksBroken {
-                    Text("Not a valid http(s) URL — the default endpoint is being used.")
-                        .font(JotUI.TypeScale.labelSmall())
-                        .foregroundStyle(JotUI.Colors.error)
-                }
                 TextField("Transcription model", text: $transcribeModel,
                           prompt: Text(Self.defaultConfig.transcribeModel))
                     .font(JotUI.TypeScale.code)
@@ -524,75 +496,18 @@ struct AdvancedPane: View {
                         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                         settings.setLiveModelOverride(trimmed.isEmpty ? nil : trimmed)
                     }
-                TextField("Formatting model", text: $cleanupModel,
-                          prompt: Text(Self.defaultConfig.cleanupModel))
-                    .font(JotUI.TypeScale.code)
-                    .onChange(of: cleanupModel) { _, value in
-                        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                        settings.setCleanupModelOverride(trimmed.isEmpty ? nil : trimmed)
-                    }
             } header: {
                 Text("Model overrides")
             } footer: {
-                Text("Preview models get renamed — override here if a model 404s. Leave blank for defaults — every edit saves as you type.")
+                Text("Both paths use OpenAI Realtime. Leave these blank for the defaults.")
             }
 
         }
-        // Key saved elsewhere (onboarding, dev-file migration) while this pane is
-        // open: refresh the badge — but never clobber in-flight feedback.
         .onReceive(NotificationCenter.default.publisher(for: .gtSettingDidChange).receive(on: RunLoop.main)) { note in
-            if note.object as? String == "apiKey", keyStatus == .missing || keyStatus == .stored {
-                keyStatus = KeychainStore.loadAPIKey() == nil ? .missing : .stored
+            if note.object as? String == "oauth" {
+                oauthSource = OpenAIOAuthStore.localLoginSource()
             }
         }
-    }
-
-    @ViewBuilder
-    private var keyStatusBadge: some View {
-        switch keyStatus {
-        case .missing:
-            Image(systemName: "key.slash").foregroundStyle(.secondary)
-        case .stored, .savedOffline:
-            Image(systemName: "checkmark.circle").foregroundStyle(.secondary)
-        case .validating:
-            ProgressView().controlSize(.small)
-        case .valid:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(JotUI.Colors.success)
-        case .invalid, .saveFailed:
-            Image(systemName: "xmark.circle.fill").foregroundStyle(JotUI.Colors.error)
-        }
-    }
-
-    private func saveAndValidate() {
-        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return }
-        keyStatus = .validating
-        Task {
-            let client = OpenAIClient(apiKey: { key })
-            let check = await client.validateKey(endpoint: settings.openAIConfig.endpoint)
-            // Same rule as onboarding: a key the server REJECTED never gets
-            // saved, but a check we simply could not perform must not wall the
-            // user out. The distinction now comes from the response itself
-            // instead of a reachability probe that false-negatives.
-            switch check {
-            case .valid, .unreachable:
-                if KeychainStore.saveAPIKey(key) {
-                    apiKey = ""
-                    keyStatus = check == .valid ? .valid : .savedOffline
-                } else {
-                    // A green check over a lost key is the worst possible lie.
-                    keyStatus = .saveFailed
-                }
-            case .rejected:
-                keyStatus = .invalid
-            }
-        }
-    }
-
-    private func removeKey() {
-        KeychainStore.deleteAPIKey(notify: true)
-        apiKey = ""
-        keyStatus = .missing
     }
 }
 

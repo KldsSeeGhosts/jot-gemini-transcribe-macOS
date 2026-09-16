@@ -18,7 +18,7 @@ import AVFoundation
 import SwiftUI
 import JotCore
 
-/// First-launch onboarding: welcome → key → mic → accessibility → Globe key →
+/// First-launch onboarding: welcome → OpenAI login → mic → accessibility → Globe key →
 /// try it → done. Warm, plain-spoken, one screen at a time (experience spec §5).
 @MainActor
 final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
@@ -77,7 +77,7 @@ private struct OnboardingFlow: View {
     var latestRecord: () -> DictationRecord? = { nil }
 
     enum Screen: Int, CaseIterable {
-        case welcome, apiKey, microphone, accessibility, globeKey, howTo, tryIt, done
+        case welcome, openAI, microphone, accessibility, globeKey, howTo, tryIt, done
     }
 
     @State private var screen: Screen = .welcome
@@ -135,7 +135,7 @@ private struct OnboardingFlow: View {
     private var currentScreen: some View {
         switch screen {
         case .welcome: WelcomeScreen(onNext: { advance() })
-        case .apiKey: APIKeyScreen(onNext: { advance() })
+        case .openAI: OpenAILoginScreen(onNext: { advance() })
         case .microphone: MicScreen(onNext: { advance() })
         case .accessibility: AccessibilityScreen(onNext: { advance() })
         case .globeKey: GlobeKeyScreen(onNext: { advance() })
@@ -215,7 +215,7 @@ private struct PrimaryButton: View {
                 // 1.37:1, effectively invisible — reported from the wild.
                 // Material's 38% disabled label would only reach 2.8:1, and this
                 // particular button is what a first-time user stares at while
-                // they go and fetch their API key, so it is legible on purpose:
+                // they finish setup, so it is legible on purpose:
                 // 4.2:1 dark / 3.4:1 light, still obviously inactive.
                 .foregroundStyle(disabled ? JotUI.Colors.onSurface.opacity(0.55) : JotUI.Colors.onPrimary)
                 .padding(.horizontal, JotUI.Spacing.xl)
@@ -348,159 +348,46 @@ private struct WelcomeScreen: View {
     }
 }
 
-private struct APIKeyScreen: View {
+private struct OpenAILoginScreen: View {
     let onNext: () -> Void
-    @State private var key = ""
-    @State private var validating = false
-    @State private var failed = false
-    @State private var saveFailed = false
-    /// The key authenticates but reaches no transcription model — say so here
-    /// rather than letting them discover it on their first dictation.
-    @State private var noModelAccess = false
-    /// Set when the server actively rejected the key, so we can say so instead of
-    /// the generic "didn't work".
-    @State private var rejection: String?
-    /// The check could not be performed. We let them past, but we say so.
-    @State private var unverified = false
-    /// Replacing a key that is already stored — bug report: a user who saved a
-    /// bad key had to UNINSTALL the app to get another chance at this screen.
-    @State private var replacing = false
-    @State private var storedKeyExists = KeychainStore.loadAPIKey() != nil
-    private var showingField: Bool { !storedKeyExists || replacing }
+    @State private var source = OpenAIOAuthStore.localLoginSource()
 
     var body: some View {
-        ScreenScaffold("Bring your own key.", "Jot uses your OpenAI API key. It's stored in your Mac's Keychain and only ever sent to OpenAI.") {
+        ScreenScaffold(
+            "Use your OpenAI login.",
+            "Jot reuses the local OAuth session created by Pi or Codex. No API key is needed."
+        ) {
             VStack(spacing: JotUI.Spacing.s) {
-                if !showingField {
-                    Label("Key already in your Keychain", systemImage: "checkmark.circle.fill")
+                if let source {
+                    Label("Signed in through \(source.rawValue)", systemImage: "checkmark.circle.fill")
                         .font(JotUI.TypeScale.body())
                         .foregroundStyle(JotUI.Colors.success)
-                    // Without this the only way out of a stored-but-wrong key was
-                    // to uninstall the app (dogfood).
-                    Button("Use a different key") {
-                        replacing = true
-                        key = ""
-                        rejection = nil
-                        unverified = false
-                        noModelAccess = false
-                    }
-                    .buttonStyle(.plain)
-                    .font(JotUI.TypeScale.labelSmall())
-                    .foregroundStyle(JotUI.Colors.onSurfaceVariant)
                 } else {
-                    SecureField("Paste your key", text: $key)
-                        .textFieldStyle(.roundedBorder)
-                        .font(JotUI.TypeScale.code)
-                        .frame(width: 320)
-                    if failed {
-                        Text(rejection.map { "That key was rejected: \($0)" }
-                             ?? "That key didn't work — check it in AI Studio.")
-                            .font(JotUI.TypeScale.labelSmall())
-                            .foregroundStyle(JotUI.Colors.error)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: 320)
-                    }
-                    if unverified {
-                        Text("Couldn't reach OpenAI to check this key. It was saved anyway, and your first dictation will verify it.")
-                            .font(JotUI.TypeScale.labelSmall())
-                            .foregroundStyle(JotUI.Colors.onSurfaceVariant)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: 320)
-                    }
-                    if saveFailed {
-                        Text("Couldn't save to your Mac's Keychain — try again.")
-                            .font(JotUI.TypeScale.labelSmall())
-                            .foregroundStyle(JotUI.Colors.error)
-                    }
-                    if noModelAccess {
-                        Text("That key works, but it can't reach one of Jot's configured models. Setup continues; check model access before dictating.")
-                            .font(JotUI.TypeScale.labelSmall())
-                            .foregroundStyle(JotUI.Colors.error)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Link("Get a key from OpenAI", destination: URL(string: "https://platform.openai.com/api-keys")!)
+                    Text("Run `pi` or `codex login` in Terminal, sign in with ChatGPT, then return here.")
                         .font(JotUI.TypeScale.labelSmall())
+                        .foregroundStyle(JotUI.Colors.onSurfaceVariant)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: 360)
                 }
-                if validating {
-                    ProgressView().controlSize(.small)
-                } else {
-                    PrimaryButton(title: showingField ? "Save & continue" : "Continue",
-                                  disabled: showingField && key.trimmingCharacters(in: .whitespaces).isEmpty) {
-                        showingField ? validate() : onNext()
-                    }
-                    if showingField {
-                        // Don't wall off mic/accessibility setup behind the key —
-                        // the menu bar nudges toward Settings → Advanced until one exists.
-                        Button("I'll add it later", action: onNext)
-                            .buttonStyle(.plain)
-                            .font(JotUI.TypeScale.labelSmall())
-                            .foregroundStyle(JotUI.Colors.onSurfaceVariant)
-                    }
+                PrimaryButton(
+                    title: source == nil ? "Check again" : "Continue",
+                    action: source == nil ? refresh : onNext
+                )
+                if source == nil {
+                    Button("I'll sign in later", action: onNext)
+                        .buttonStyle(.plain)
+                        .font(JotUI.TypeScale.labelSmall())
+                        .foregroundStyle(JotUI.Colors.onSurfaceVariant)
                 }
             }
         }
+        .onAppear(perform: refresh)
     }
 
-    private func validate() {
-        // Guard the re-entry: `validating` swaps the button for a spinner, but a
-        // fast double-click can land two taps before SwiftUI redraws, and a user
-        // staring at a rejection WILL mash it.
-        guard !validating else { return }
-        let candidate = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        validating = true
-        failed = false
-        rejection = nil
-        unverified = false
-        Task {
-            let client = OpenAIClient(apiKey: { candidate })
-            let check = await client.validateKey(endpoint: SettingsStore().openAIConfig.endpoint)
-
-            if case .rejected(let detail) = check {
-                // The server answered and said no. This is the case that used to
-                // slip through: validateKey returned a bare false, and a
-                // false-negative from a 1s reachability probe sent it down the
-                // "offline, save anyway" path — which then stored the bad key and
-                // advanced, with no way back to this screen.
-                rejection = detail
-                failed = true
-                validating = false
-                return
-            }
-
-            if check == .valid {
-                // "Your key works" must mean dictation works. Check the model
-                // Jot actually ships on — and only report, never substitute.
-                let config = SettingsStore().openAIConfig
-                let transcriptionUnavailable = await client.resolveAvailableModel(
-                    from: [config.transcribeModel], endpoint: config.endpoint
-                ) == nil
-                let cleanupUnavailable = await client.resolveAvailableModel(
-                    from: [config.cleanupModel], endpoint: config.endpoint
-                ) == nil
-                noModelAccess = transcriptionUnavailable || cleanupUnavailable
-            }
-            unverified = (check == .unreachable)
-
-            guard KeychainStore.saveAPIKey(candidate) else {
-                saveFailed = true
-                validating = false
-                return
-            }
-            storedKeyExists = true
-            replacing = false
-            validating = false
-            // An unreachable check still advances — a captive portal must not
-            // wall someone out of setup — but the notice above says so plainly
-            // rather than implying the key was verified.
-            if unverified {
-                // Let them read it before the screen changes.
-                try? await Task.sleep(nanoseconds: 1_600_000_000)
-            }
-            onNext()
-        }
+    private func refresh() {
+        source = OpenAIOAuthStore.localLoginSource()
+        NotificationCenter.default.post(name: .gtSettingDidChange, object: "oauth")
     }
 }
 

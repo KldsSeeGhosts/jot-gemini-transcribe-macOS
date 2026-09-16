@@ -67,9 +67,7 @@ final class LiveInteractionsProbeTests: XCTestCase {
         try XCTSkipUnless(env["JOT_LIVE_PROBE"] == "1", "live probe not opted in")
         let key = try XCTUnwrap(env["OPENAI_API_KEY"])
         let client = OpenAIClient(apiKey: { key })
-        XCTAssertEqual(
-            await client.validateKey(endpoint: OpenAIConfig().endpoint),
-            .valid
-        )
+        let check = await client.validateKey(endpoint: OpenAIConfig().endpoint)
+        XCTAssertEqual(check, .valid)
     }
 }

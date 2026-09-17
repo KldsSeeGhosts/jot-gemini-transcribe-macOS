@@ -82,12 +82,17 @@ public enum LiveProtocol {
         return (try? JSONSerialization.data(withJSONObject: frame)) ?? Data()
     }
 
+    private static let audioFramePrefix = Data("{\"type\":\"input_audio_buffer.append\",\"audio\":\"".utf8)
+    private static let audioFrameSuffix = Data("\"}".utf8)
+
     public static func audioFrame(_ pcm: Data) -> Data {
-        let frame: [String: Any] = [
-            "type": "input_audio_buffer.append",
-            "audio": pcm.base64EncodedString(),
-        ]
-        return (try? JSONSerialization.data(withJSONObject: frame)) ?? Data()
+        let base64 = pcm.base64EncodedData()
+        var frame = Data()
+        frame.reserveCapacity(audioFramePrefix.count + base64.count + audioFrameSuffix.count)
+        frame.append(audioFramePrefix)
+        frame.append(base64)
+        frame.append(audioFrameSuffix)
+        return frame
     }
 
     public static func activityStartFrame() -> Data {

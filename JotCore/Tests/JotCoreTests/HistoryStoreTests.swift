@@ -70,4 +70,51 @@ final class HistoryStoreTests: XCTestCase {
         store.reindex(recordingsRoot: recordings)
         XCTAssertEqual(store.allIDsForTesting(), [kept.id.uuidString])
     }
+
+    func testMigrationV3WordCountAndStats() throws {
+        var meta1 = SessionMeta(id: UUID(), startedAt: Date(), status: .inserted)
+        meta1.cleanedTranscript = "One two three four"
+        meta1.audioDurationSeconds = 12.0
+        let folder1 = root.appendingPathComponent("recordings/\(meta1.id.uuidString)")
+        store.upsert(meta: meta1, folder: folder1)
+
+        let record1 = store.records().first { $0.id == meta1.id.uuidString }
+        XCTAssertEqual(record1?.wordCount, 4)
+
+        var meta2 = SessionMeta(id: UUID(), startedAt: Date(), status: .inserted)
+        meta2.cleanedTranscript = "Five six seven"
+        meta2.audioDurationSeconds = 8.0
+        let folder2 = root.appendingPathComponent("recordings/\(meta2.id.uuidString)")
+        store.upsert(meta: meta2, folder: folder2)
+
+        let stats = store.stats()
+        XCTAssertEqual(stats.totalDictations, 2)
+        XCTAssertEqual(stats.totalWords, 7)
+        // 7 words over 20 seconds = 7 / (20/60) = 21 WPM
+        XCTAssertEqual(stats.averageWPM, 21)
+    }
+
+    func testReindexBatchesNotification() throws {
+        let recordings = root.appendingPathComponent("recordings", isDirectory: true)
+        for i in 0..<5 {
+            var meta = SessionMeta(id: UUID(), startedAt: Date(), status: .inserted)
+            meta.cleanedTranscript = "Session \(i)"
+            let folder = recordings.appendingPathComponent(meta.id.uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            meta.write(to: folder)
+        }
+
+        var notificationCount = 0
+        let token = NotificationCenter.default.addObserver(
+            forName: .gtHistoryDidChange,
+            object: nil,
+            queue: nil
+        ) { _ in
+            notificationCount += 1
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        store.reindex(recordingsRoot: recordings)
+        XCTAssertEqual(notificationCount, 1, "reindex should post exactly one change notification for all folders")
+    }
 }

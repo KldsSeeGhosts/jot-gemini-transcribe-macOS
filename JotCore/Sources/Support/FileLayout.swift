@@ -31,13 +31,22 @@ public enum FileLayout {
         appSupportRoot.appendingPathComponent("recordings", isDirectory: true)
     }
 
-    /// Creates (if needed) and returns a fresh session folder. Name is
-    /// timestamp-prefixed for human sortability in Finder.
-    public static func makeSessionFolder(id: UUID, now: Date = Date()) throws -> URL {
+    private static let sessionFolderLock = NSLock()
+    private static let sessionFolderFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        let name = "\(formatter.string(from: now))-\(id.uuidString.prefix(8))"
+        return formatter
+    }()
+
+    /// Creates (if needed) and returns a fresh session folder. Name is
+    /// timestamp-prefixed for human sortability in Finder.
+    public static func makeSessionFolder(id: UUID, now: Date = Date()) throws -> URL {
+        let timestamp: String
+        sessionFolderLock.lock()
+        timestamp = sessionFolderFormatter.string(from: now)
+        sessionFolderLock.unlock()
+        let name = "\(timestamp)-\(id.uuidString.prefix(8))"
         let url = recordingsRoot.appendingPathComponent(name, isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url

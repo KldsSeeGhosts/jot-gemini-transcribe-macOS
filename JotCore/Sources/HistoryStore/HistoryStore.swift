@@ -32,6 +32,7 @@ public struct DictationRecord: Codable, Equatable, Identifiable, FetchableRecord
     public var errorCode: String?
     public var errorMessage: String?
     public var pipelineSeconds: Double?
+    public var wordCount: Int?
 
     public var displayText: String {
         cleanedTranscript ?? rawTranscript ?? ""
@@ -54,6 +55,7 @@ public struct DictationRecord: Codable, Equatable, Identifiable, FetchableRecord
         self.errorCode = meta.errorCode
         self.errorMessage = meta.errorMessage
         self.pipelineSeconds = meta.pipelineSeconds
+        self.wordCount = meta.cleanedTranscript.map { $0.split(whereSeparator: \.isWhitespace).count }
     }
 }
 
@@ -133,16 +135,25 @@ public final class HistoryStore: @unchecked Sendable {
                 t.add(column: "errorMessage", .text)
             }
         }
+        migrator.registerMigration("v3-wordCount") { db in
+            try db.alter(table: DictationRecord.databaseTableName) { t in
+                t.add(column: "wordCount", .integer)
+            }
+        }
         try migrator.migrate(queue)
     }
 
     // MARK: - Writes
 
-    public func upsert(meta: SessionMeta, folder: URL) {
+    private func upsert(db: Database, meta: SessionMeta, folder: URL) throws {
         let record = DictationRecord(meta: meta, folder: folder)
+        try record.save(db)
+    }
+
+    public func upsert(meta: SessionMeta, folder: URL) {
         do {
             try queue.write { db in
-                try record.save(db)
+                try upsert(db: db, meta: meta, folder: folder)
             }
             Self.notifyChanged()
         } catch {
@@ -198,25 +209,32 @@ public final class HistoryStore: @unchecked Sendable {
         let folders = (try? FileManager.default.contentsOfDirectory(
             at: recordingsRoot, includingPropertiesForKeys: nil
         )) ?? []
-        for folder in folders where folder.hasDirectoryPath {
-            if let meta = SessionMeta.read(from: folder) {
-                upsert(meta: meta, folder: folder)
+        var orphansCount = 0
+        do {
+            try queue.write { db in
+                for folder in folders where folder.hasDirectoryPath {
+                    if let meta = SessionMeta.read(from: folder) {
+                        try upsert(db: db, meta: meta, folder: folder)
+                    }
+                }
+                // Prune orphaned rows — from the UNFILTERED table. records() hides
+                // silent/short-cancelled rows, and exactly those would otherwise linger
+                // forever as invisible ghosts after external folder cleanup.
+                let all = try DictationRecord.fetchAll(db)
+                let orphans = all.filter {
+                    !FileManager.default.fileExists(atPath: $0.folder)
+                }
+                for orphan in orphans {
+                    try DictationRecord.deleteOne(db, key: orphan.id)
+                }
+                orphansCount = orphans.count
             }
+            Self.notifyChanged()
+        } catch {
+            Log.history.error("HistoryStore: reindex failed: \(error)")
         }
-        // Prune orphaned rows — from the UNFILTERED table. records() hides
-        // silent/short-cancelled rows, and exactly those would otherwise linger
-        // forever as invisible ghosts after external folder cleanup.
-        let all = (try? queue.read { db in
-            try DictationRecord.fetchAll(db)
-        }) ?? []
-        let orphans = all.filter {
-            !FileManager.default.fileExists(atPath: $0.folder)
-        }
-        for orphan in orphans {
-            delete(id: orphan.id, removeFolder: false)
-        }
-        if !orphans.isEmpty {
-            Log.history.info("reindex pruned \(orphans.count) orphaned row(s)")
+        if orphansCount > 0 {
+            Log.history.info("reindex pruned \(orphansCount) orphaned row(s)")
         }
     }
 
@@ -309,16 +327,21 @@ public final class HistoryStore: @unchecked Sendable {
     public func stats() -> Stats {
         (try? queue.read { db in
             let rows = try Row.fetchAll(db, sql: """
-                SELECT cleanedTranscript, durationSeconds FROM dictation
+                SELECT cleanedTranscript, durationSeconds, wordCount FROM dictation
                 WHERE cleanedTranscript IS NOT NULL
                 """)
             var words = 0
             var timedWords = 0
             var speech = 0.0
             for row in rows {
-                let text: String = row["cleanedTranscript"] ?? ""
-                // Whitespace-aware split (newlines count too — audit L29).
-                let count = text.split(whereSeparator: \.isWhitespace).count
+                let count: Int
+                if let storedCount: Int = row["wordCount"] {
+                    count = storedCount
+                } else {
+                    let text: String = row["cleanedTranscript"] ?? ""
+                    // Whitespace-aware split (newlines count too — audit L29).
+                    count = text.split(whereSeparator: \.isWhitespace).count
+                }
                 words += count
                 if let duration: Double = row["durationSeconds"], duration > 0 {
                     timedWords += count

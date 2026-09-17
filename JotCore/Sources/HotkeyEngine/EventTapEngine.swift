@@ -57,6 +57,7 @@ public final class EventTapEngine {
     private let timerQueue = DispatchQueue(label: "com.ammaar.jot.hotkey.timer")
     private var doubleTapTimer: DispatchSourceTimer?
     private var healthTimer: DispatchSourceTimer?
+    private var startSemaphore: DispatchSemaphore?
 
     public init(key: HotkeyKey = .fn) {
         self.key = key
@@ -108,6 +109,9 @@ public final class EventTapEngine {
         }
         guard tapThread == nil else { return state == .running }
 
+        let sema = DispatchSemaphore(value: 0)
+        startSemaphore = sema
+
         let thread = Thread { [weak self] in
             self?.threadMain()
         }
@@ -117,10 +121,9 @@ public final class EventTapEngine {
         thread.start()
 
         // Wait briefly for the thread to report tap creation success/failure.
-        let deadline = Date().addingTimeInterval(2)
-        while state == .stopped && Date() < deadline {
-            usleep(10_000)
-        }
+        _ = sema.wait(timeout: .now() + 2.0)
+        startSemaphore = nil
+
         if state == .running {
             startHealthTimer()
         }
@@ -136,6 +139,8 @@ public final class EventTapEngine {
         runLoop = nil
         tapThread = nil
         state = .stopped
+        startSemaphore?.signal()
+        startSemaphore = nil
     }
 
     // MARK: - Tap thread
@@ -159,6 +164,7 @@ public final class EventTapEngine {
         ) else {
             Log.hotkey.error("EventTapEngine: tap creation failed — Accessibility not granted")
             state = .permissionDenied
+            startSemaphore?.signal()
             return
         }
 
@@ -168,6 +174,7 @@ public final class EventTapEngine {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         state = .running
+        startSemaphore?.signal()
         Log.hotkey.info("EventTapEngine: tap running (key=\(self.key.rawValue, privacy: .public))")
         CFRunLoopRun()
         Log.hotkey.info("EventTapEngine: run loop exited")

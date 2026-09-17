@@ -72,6 +72,10 @@ public actor LiveTranscriptionSession {
     private var didSetup = false
     private var activityEndFlushed = false
     private var closed = false
+    private var flushContinuation: CheckedContinuation<Void, Never>?
+    private var finalContinuation: CheckedContinuation<Void, Never>?
+    private var flushTimeoutTask: Task<Void, Never>?
+    private var finalTimeoutTask: Task<Void, Never>?
 
     /// Partials for the HUD. Separate from the outcome on purpose — nothing that
     /// arrives here is allowed to become the transcript.
@@ -173,6 +177,7 @@ public actor LiveTranscriptionSession {
                     recordFailure("activityEnd failed: \(error)")
                 }
                 activityEndFlushed = true
+                resumeFlush()
                 return
             }
         }
@@ -190,6 +195,7 @@ public actor LiveTranscriptionSession {
                 case .final(let text):
                     finals.append(text)
                     latestPartial = ""
+                    resumeFinal()
                 case .goAway:
                     recordFailure("server sent goAway")
                     return
@@ -208,6 +214,54 @@ public actor LiveTranscriptionSession {
 
     private func recordFailure(_ why: String) {
         if failure == nil { failure = why }
+        resumeFlush()
+        resumeFinal()
+    }
+
+    private func resumeFlush() {
+        flushTimeoutTask?.cancel()
+        flushTimeoutTask = nil
+        flushContinuation?.resume()
+        flushContinuation = nil
+    }
+
+    private func resumeFinal() {
+        finalTimeoutTask?.cancel()
+        finalTimeoutTask = nil
+        finalContinuation?.resume()
+        finalContinuation = nil
+    }
+
+    private func waitForFlush(timeout: TimeInterval) async {
+        guard !activityEndFlushed, failure == nil, !closed else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            self.flushContinuation = continuation
+            self.flushTimeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                await self?.flushTimedOut()
+            }
+        }
+    }
+
+    private func flushTimedOut() {
+        guard !Task.isCancelled else { return }
+        resumeFlush()
+    }
+
+    private func waitForFinal(timeout: TimeInterval) async {
+        guard finals.isEmpty, failure == nil, !closed else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            self.finalContinuation = continuation
+            self.finalTimeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                await self?.finalTimedOut()
+            }
+        }
+    }
+
+    private func finalTimedOut() {
+        guard !Task.isCancelled else { return }
+        resumeFinal()
     }
 
     /// Ends the turn and waits for the server's last word.
@@ -224,18 +278,12 @@ public actor LiveTranscriptionSession {
 
         // Wait for the send loop to actually flush activityEnd before starting
         // the clock on the final transcript.
-        let flushDeadline = Date().addingTimeInterval(2.0)
-        while !activityEndFlushed, failure == nil, Date() < flushDeadline {
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
+        await waitForFlush(timeout: 2.0)
         if let failure { close(); return .unusable(failure) }
         guard activityEndFlushed else { close(); return .unusable("activityEnd never flushed") }
 
         // A final may already have arrived. Otherwise wait, briefly.
-        let finalDeadline = Date().addingTimeInterval(deadline)
-        while finals.isEmpty, failure == nil, Date() < finalDeadline {
-            try? await Task.sleep(nanoseconds: 30_000_000)
-        }
+        await waitForFinal(timeout: deadline)
         close()
 
         if let failure { return .unusable(failure) }
@@ -262,6 +310,8 @@ public actor LiveTranscriptionSession {
         commandSink.finish()
         partialSink.finish()
         transport.close()
+        resumeFlush()
+        resumeFinal()
     }
 
     /// Bytes the socket accepted, for reconciliation against `framesWritten * 2`.

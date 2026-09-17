@@ -47,4 +47,39 @@ final class OpenAIRealtimeProtocolTests: XCTestCase {
         XCTAssertEqual(LiveProtocol.decode(delta), .partial("Hello"))
         XCTAssertEqual(LiveProtocol.decode(final), .final("Hello there."))
     }
+
+    private func legacyAudioFrame(_ pcm: Data) -> Data {
+        let frame = NSDictionary(
+            objects: ["input_audio_buffer.append", pcm.base64EncodedString()],
+            forKeys: ["type" as NSString, "audio" as NSString]
+        )
+        return (try? JSONSerialization.data(withJSONObject: frame, options: .withoutEscapingSlashes)) ?? Data()
+    }
+
+    func testAudioFrameByteIdenticalToLegacyEncoding() throws {
+        let testSamples: [Data] = [
+            Data(),
+            Data([0x01, 0x02, 0x03, 0x04]),
+            Data([0xFF, 0xFF, 0xFC]), // produces slashes in base64
+            Data((0..<1024).map { UInt8($0 & 0xFF) }),
+        ]
+
+        for pcm in testSamples {
+            let assembled = LiveProtocol.audioFrame(pcm)
+            let legacy = legacyAudioFrame(pcm)
+
+            // Assert byte-identical output
+            XCTAssertEqual(assembled, legacy, "audioFrame byte output did not match legacy JSONSerialization output")
+
+            // Assert valid JSON object decoding
+            let jsonObject = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: assembled) as? [String: String]
+            )
+            XCTAssertEqual(jsonObject["type"], "input_audio_buffer.append")
+            XCTAssertEqual(jsonObject["audio"], pcm.base64EncodedString())
+
+            // Assert decode safety (client frames are ignored by server event decoder)
+            XCTAssertNil(LiveProtocol.decode(assembled))
+        }
+    }
 }

@@ -16,6 +16,7 @@ import AVFoundation
 import Accelerate
 import CoreAudio
 import Foundation
+import ObjCExceptionGuard
 
 /// The crash-safe recorder.
 ///
@@ -29,10 +30,34 @@ import Foundation
 ///    instead (Wispr behavior). True pinning is a v1.x investigation (raw AUHAL).
 ///  - Zero frames captured is a detectable error state, never an empty transcript.
 public final class AudioCaptureEngine: AudioCapturing {
-    public var onLevel: ((Float) -> Void)?
-    public var onDeviceChange: ((String) -> Void)?
-    public var onWriteFailure: (() -> Void)?
-    public var onEngineDied: ((String) -> Void)?
+    /// The tap thread calls these (level) and the write queue calls them
+    /// (device change, write failure, engine death) while the main actor
+    /// assigns them — a bare `var` closure read racing a write is UB, so every
+    /// access goes through `callbackLock`. The `get` hands back a copied
+    /// reference, so `onLevel?(level)` is a snapshot and the lock is never held
+    /// across the callback itself.
+    private let callbackLock = NSLock()
+    private var _onLevel: ((Float) -> Void)?
+    private var _onDeviceChange: ((String) -> Void)?
+    private var _onWriteFailure: (() -> Void)?
+    private var _onEngineDied: ((String) -> Void)?
+
+    public var onLevel: ((Float) -> Void)? {
+        get { callbackLock.lock(); defer { callbackLock.unlock() }; return _onLevel }
+        set { callbackLock.lock(); _onLevel = newValue; callbackLock.unlock() }
+    }
+    public var onDeviceChange: ((String) -> Void)? {
+        get { callbackLock.lock(); defer { callbackLock.unlock() }; return _onDeviceChange }
+        set { callbackLock.lock(); _onDeviceChange = newValue; callbackLock.unlock() }
+    }
+    public var onWriteFailure: (() -> Void)? {
+        get { callbackLock.lock(); defer { callbackLock.unlock() }; return _onWriteFailure }
+        set { callbackLock.lock(); _onWriteFailure = newValue; callbackLock.unlock() }
+    }
+    public var onEngineDied: ((String) -> Void)? {
+        get { callbackLock.lock(); defer { callbackLock.unlock() }; return _onEngineDied }
+        set { callbackLock.lock(); _onEngineDied = newValue; callbackLock.unlock() }
+    }
 
     /// Set once per session in `start`, read only on the write queue. Never
     /// reassigned mid-session — see the note on `AudioCapturing.start`.
@@ -271,8 +296,24 @@ public final class AudioCaptureEngine: AudioCapturing {
         // really arrive at ~10Hz, not the ~47Hz this comment used to claim
         // (docs/design/latency-audit-2026-08-19.md:53). Every threshold that
         // watches this stream has ~100ms of resolution, no more.
-        input.installTap(onBus: 0, bufferSize: 1024, format: hwFormat) { [weak self] buffer, _ in
-            self?.ingest(buffer, hwRate: hwFormat.sampleRate)
+        //
+        // installTap RAISES an NSException (it does not throw an Error) when the
+        // input device the format came from vanishes mid-build — a USB mic
+        // re-enumerating, AirPods renegotiating — and Swift cannot catch it, so
+        // the whole app aborted (crash report 2026-09-16: SIGABRT in prewarm,
+        // five minutes after launch, no user action). The format guard above
+        // narrows the window but cannot close it; this boundary can.
+        var tapException: NSString?
+        let tapInstalled = ObjCRunCatching(
+            {
+                input.installTap(onBus: 0, bufferSize: 1024, format: hwFormat) { [weak self] buffer, _ in
+                    self?.ingest(buffer, hwRate: hwFormat.sampleRate)
+                }
+            },
+            &tapException
+        )
+        guard tapInstalled else {
+            throw CaptureError.tapInstall(tapException as String? ?? "unknown AVAudioEngine exception")
         }
 
         engine.prepare()
@@ -308,7 +349,9 @@ public final class AudioCaptureEngine: AudioCapturing {
         // A stop() parked on the tail must never outlive the engine.
         resumeTailWaiter()
         if let engine {
-            engine.inputNode.removeTap(onBus: 0)
+            _ = ObjCRunCatching({
+                engine.inputNode.removeTap(onBus: 0)
+            }, nil)
             engine.stop()
         }
         engine = nil
@@ -489,14 +532,45 @@ public final class AudioCaptureEngine: AudioCapturing {
             return rms
         }
         if let ints = buffer.int16ChannelData?[0] {
-            var scratch = [Float](repeating: 0, count: Int(buffer.frameLength))
-            vDSP_vflt16(ints, 1, &scratch, 1, count)
-            var scale = Float(1.0 / 32_768.0)
-            vDSP_vsmul(scratch, 1, &scale, &scratch, 1, count)
-            vDSP_rmsqv(scratch, 1, &rms, count)
+            rms = Self.int16Scratch.withLock { scratch in
+                if scratch.count < Int(count) {
+                    scratch = [Float](repeating: 0, count: Int(count))
+                }
+                var localRMS: Float = 0
+                scratch.withUnsafeMutableBufferPointer { ptr in
+                    guard let base = ptr.baseAddress else { return }
+                    vDSP_vflt16(ints, 1, base, 1, count)
+                    var scale = Float(1.0 / 32_768.0)
+                    vDSP_vsmul(base, 1, &scale, base, 1, count)
+                    vDSP_rmsqv(base, 1, &localRMS, count)
+                }
+                return localRMS
+            }
             return rms
         }
         return nil
+    }
+
+    /// Shared grow-only scratch for the Int16 RMS path. `meanSquareRoot` is
+    /// static and called from two racing contexts — `meterLevel` on the tap
+    /// thread and `recordWrittenPeak` on the write queue — so the buffer needs
+    /// its own lock, never `stateLock` (which `meterLevel` does not hold).
+    /// Grow-only: tap frame counts are uniform within a session, so a one-time
+    /// upsize to the largest seen buffer ends allocation for the session.
+    private static let int16Scratch = LockedBox([Float]())
+
+    /// Minimal lock-protected box for the shared RMS scratch. Not `stateLock`:
+    /// `meterLevel` calls `meanSquareRoot` on the realtime tap thread without
+    /// holding it, and a shared lock would couple metering to the write path.
+    private final class LockedBox<T>: @unchecked Sendable {
+        private var value: T
+        private let lock = NSLock()
+        init(_ value: T) { self.value = value }
+        func withLock<R>(_ body: (inout T) -> R) -> R {
+            lock.lock()
+            defer { lock.unlock() }
+            return body(&value)
+        }
     }
 
     private func reportMeteringBlind(_ buffer: AVAudioPCMBuffer) {
@@ -534,6 +608,9 @@ public final class AudioCaptureEngine: AudioCapturing {
     public enum CaptureError: Error, Equatable {
         case noInputDevice
         case converterUnavailable
+        /// installTap raised an NSException (device vanished mid-build). Landed
+        /// here via the ObjC boundary rather than as an abort.
+        case tapInstall(String)
         case engineStart(String)
     }
 }

@@ -39,20 +39,47 @@ public struct DictionaryStore: Sendable {
     private static let key = "dictionaryEntries"
     private static let defaults = UserDefaults.standard
 
+    private struct Cache {
+        var lastData: Data?
+        var decodedEntries: [DictionaryEntry] = []
+    }
+    private static let cacheLock = NSLock()
+    nonisolated(unsafe) private static var cache = Cache()
+
     public init() {}
 
     public func entries() -> [DictionaryEntry] {
-        guard let data = Self.defaults.data(forKey: Self.key),
-              let entries = try? JSONDecoder().decode([DictionaryEntry].self, from: data) else {
+        guard let data = Self.defaults.data(forKey: Self.key) else {
+            Self.cacheLock.lock()
+            Self.cache = Cache(lastData: nil, decodedEntries: [])
+            Self.cacheLock.unlock()
             return []
         }
+
+        Self.cacheLock.lock()
+        if Self.cache.lastData == data {
+            let cached = Self.cache.decodedEntries
+            Self.cacheLock.unlock()
+            return cached
+        }
+        Self.cacheLock.unlock()
+
+        guard let entries = try? JSONDecoder().decode([DictionaryEntry].self, from: data) else {
+            return []
+        }
+
+        Self.cacheLock.lock()
+        Self.cache = Cache(lastData: data, decodedEntries: entries)
+        Self.cacheLock.unlock()
         return entries
     }
 
     public func save(_ entries: [DictionaryEntry]) {
-        if let data = try? JSONEncoder().encode(entries) {
-            Self.defaults.set(data, forKey: Self.key)
-        }
+        guard let data = try? JSONEncoder().encode(entries) else { return }
+        Self.cacheLock.lock()
+        Self.cache = Cache(lastData: data, decodedEntries: entries)
+        Self.cacheLock.unlock()
+        Self.defaults.set(data, forKey: Self.key)
     }
 
     @discardableResult

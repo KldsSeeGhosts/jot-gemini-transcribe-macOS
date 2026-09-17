@@ -46,13 +46,13 @@ public final class DictationCoordinator: ObservableObject {
 
     /// Below this metered peak the user simply didn't speak (F9b). Scale matches
     /// AudioCaptureEngine's onLevel; whisper-quiet speech peaks well above it.
-    static let silencePeakThreshold: Float = 0.06
+    nonisolated static let silencePeakThreshold: Float = 0.06
     /// Clips shorter than this can't contain a word — never sent to the API
     /// (dogfood: a 0.19s blip got uploaded, errored, and showed as Failed).
-    static let minimumSendableDuration: Double = 0.4
+    nonisolated static let minimumSendableDuration: Double = 0.4
     /// Zero frames on a hold shorter than this is an accidental blip, not an
     /// engine failure — the first buffer simply hadn't arrived yet.
-    static let blipHoldThreshold: TimeInterval = 0.8
+    nonisolated static let blipHoldThreshold: TimeInterval = 0.8
     /// Releasing the key a beat before the last word is finished is a NORMAL
     /// human gesture — the hand anticipates the mouth. When the user is still
     /// speaking at key-up, keep capturing until they actually stop.
@@ -136,12 +136,13 @@ public final class DictationCoordinator: ObservableObject {
     /// left-hand side of the diff.
     private var lastInterim: String = ""
     private var capture: AudioCapturing?
-    /// Most recent metered level — decides whether the user was mid-word when
-    /// they released the key.
-    private var latestLevel: Float = 0
-    /// How loud the room is. Always measured, never in charge: what it feeds is
-    /// gated on `noiseHandlingActive`, what it records is not.
-    private var noiseFloor = NoiseFloorEstimator()
+    /// The tap thread's decision inputs: the most recent metered level (decides
+    /// whether the user was mid-word at key-up) and the room's loudness (always
+    /// measured, never in charge: what it feeds is gated on `noiseHandlingActive`,
+    /// what it records is not). Both update on the tap thread under a lock, so
+    /// `captureTrailingSpeech`'s 60ms poll reads fresh values without a main-actor
+    /// hop per buffer.
+    private let levelState = LevelState()
     /// Why the last session ended with no speech — the pill copy differs, nothing
     /// else does, so this rides alongside the outcome instead of widening the
     /// state machine for a string.
@@ -320,14 +321,20 @@ public final class DictationCoordinator: ObservableObject {
             meta.write(to: folder)
             session = Session(id: id, folder: folder, startedAt: startedAt, context: context, meta: meta)
 
-            noiseFloor = NoiseFloorEstimator()
+            // Fresh room profile per session, and the meter is publishing again
+            // (captureTrailingSpeech turned it off for the previous finalize).
+            levelState.reset()
             noiseHandlingActive = noiseHandlingEnabled()
 
             let capture = audioFactory()
             self.capture = capture
             capture.onLevel = { [weak self] level in
-                Task { @MainActor [weak self] in
-                    self?.ingestLevel(level, updatingMeter: true)
+                guard let self else { return }
+                // Decision inputs update on the tap thread — no main-actor hop, so
+                // captureTrailingSpeech's 60ms poll reads fresh values, not stale ones.
+                self.levelState.ingest(level)
+                if self.levelState.meteringEnabled {
+                    Task { @MainActor [weak self] in self?.micLevel = level }
                 }
             }
             capture.onDeviceChange = { [weak self] message in
@@ -484,18 +491,6 @@ public final class DictationCoordinator: ObservableObject {
         finalizeSession()
     }
 
-    /// The ONE place levels enter the coordinator.
-    ///
-    /// `captureTrailingSpeech` reassigns `capture.onLevel`, replacing the closure
-    /// installed at session start. Both paths must feed the estimator or it
-    /// starves in exactly the window that needs it most — the moment after key-up
-    /// when we are deciding whether the user is still talking.
-    private func ingestLevel(_ level: Float, updatingMeter: Bool) {
-        if updatingMeter { micLevel = level }
-        latestLevel = level
-        noiseFloor.ingest(level: level)
-    }
-
     /// The level below which the user has stopped talking.
     ///
     /// Absolute by default. With the experiment on it rises to sit just above a
@@ -505,8 +500,8 @@ public final class DictationCoordinator: ObservableObject {
     /// behaviour and pay the full cap rather than risk clipping a word.
     private func currentTrailingThreshold() -> Float {
         guard noiseHandlingActive,
-              let floorDB = noiseFloor.floorDB,
-              let snr = noiseFloor.measuredSNR,
+              let floorDB = levelState.floorDB,
+              let snr = levelState.measuredSNR,
               snr >= Self.trailingTrustSNR
         else { return Self.trailingSpeechThreshold }
         let targetDB = floorDB + Self.trailingFloorMarginDB
@@ -527,7 +522,7 @@ public final class DictationCoordinator: ObservableObject {
         // pill is already showing .finalizing, so the wait is visually covered.
         let engine = capture
         capture = nil
-        let wasSpeaking = latestLevel >= currentTrailingThreshold()
+        let wasSpeaking = levelState.latestLevel >= currentTrailingThreshold()
         micLevel = 0
         Task { @MainActor [weak self] in
             if wasSpeaking, let engine {
@@ -541,6 +536,11 @@ public final class DictationCoordinator: ObservableObject {
     /// Keep the mic open past key-up until the user actually stops talking.
     /// Returns as soon as they're quiet — capped so it can never hang.
     private func captureTrailingSpeech(from engine: AudioCapturing) async {
+        // The pill already shows .finalizing; bars don't need publishing. The
+        // level still feeds the estimator via the session-start closure, which
+        // is never reassigned — `levelState.reset()` re-enables metering at the
+        // next session's key-down.
+        levelState.meteringEnabled = false
         // Real elapsed time, not the injectable session clock: this is about how
         // long actual audio keeps arriving.
         let start = DispatchTime.now()
@@ -548,15 +548,12 @@ public final class DictationCoordinator: ObservableObject {
             Double(DispatchTime.now().uptimeNanoseconds - mark.uptimeNanoseconds) / 1_000_000_000
         }
         var quietSince: DispatchTime?
-        // The engine keeps reporting levels after key-up; watch them directly.
-        engine.onLevel = { [weak self] level in
-            // updatingMeter: false — the pill already shows .finalizing; this is
-            // about hearing whether they are still talking, not drawing bars.
-            Task { @MainActor [weak self] in self?.ingestLevel(level, updatingMeter: false) }
-        }
+        // The engine keeps reporting levels after key-up; the closure installed
+        // at session start is still feeding `levelState` (never reassigned, so
+        // the estimator cannot starve right here), and we watch it directly.
         while elapsed(since: start) < Self.trailingCaptureCap {
             try? await Task.sleep(nanoseconds: 60_000_000)
-            if latestLevel < currentTrailingThreshold() {
+            if levelState.latestLevel < currentTrailingThreshold() {
                 let since = quietSince ?? DispatchTime.now()
                 quietSince = since
                 if elapsed(since: since) >= Self.trailingQuietToStop { break }
@@ -593,9 +590,9 @@ public final class DictationCoordinator: ObservableObject {
         self.session = session
         // Only meaningful together: a peak with no floor to compare it against
         // says nothing about the room, and would read as a measurement.
-        let roomFloorDB = noiseFloor.floorDB
-        let speechPeakDB = roomFloorDB == nil ? nil : noiseFloor.peakDB
-        let separation = noiseFloor.measuredSNR
+        let roomFloorDB = levelState.floorDB
+        let speechPeakDB = roomFloorDB == nil ? nil : levelState.peakDB
+        let separation = levelState.measuredSNR
         updateMeta {
             $0.status = .recorded
             $0.audioDurationSeconds = result.durationSeconds
@@ -748,7 +745,7 @@ public final class DictationCoordinator: ObservableObject {
             // Classify honestly, but KEEP the recording: a high absolute peak means
             // we might be wrong, and Retry has to still exist when we are.
             if noiseHandlingActive,
-               let snr = noiseFloor.measuredSNR,
+               let snr = levelState.measuredSNR,
                snr < Self.emptyTranscriptSNRThreshold {
                 Log.audio.info("empty transcript with only \(snr, format: .fixed(precision: 1))dB above the room — no speech, not a failure")
                 // NOT .silent: HistoryStore's visible filter ends with
@@ -869,5 +866,34 @@ public final class DictationCoordinator: ObservableObject {
         session.meta.write(to: session.folder)
         self.session = session
         onSessionUpdate?(session.meta, session.folder)
+    }
+
+    // MARK: - Level state
+
+    /// Holds the values the tap thread updates on every buffer. `NoiseFloorEstimator`
+    /// is a struct, so it lives inside the box and is mutated under the lock.
+    /// Written on the realtime tap thread; read on the main actor by
+    /// `captureTrailingSpeech`'s 60ms loop — the lock is the synchronization point.
+    private final class LevelState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var level: Float = 0
+        private var estimator = NoiseFloorEstimator()
+        /// When false the level is still recorded but not published to the HUD.
+        private var publishesToMeter = true
+
+        func ingest(_ newLevel: Float) {
+            lock.lock(); defer { lock.unlock() }
+            level = newLevel
+            estimator.ingest(level: newLevel)
+        }
+        var latestLevel: Float { lock.lock(); defer { lock.unlock() }; return level }
+        var floorDB: Double? { lock.lock(); defer { lock.unlock() }; return estimator.floorDB }
+        var peakDB: Double { lock.lock(); defer { lock.unlock() }; return estimator.peakDB }
+        var measuredSNR: Double? { lock.lock(); defer { lock.unlock() }; return estimator.measuredSNR }
+        var meteringEnabled: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return publishesToMeter }
+            set { lock.lock(); publishesToMeter = newValue; lock.unlock() }
+        }
+        func reset() { lock.lock(); estimator = NoiseFloorEstimator(); level = 0; publishesToMeter = true; lock.unlock() }
     }
 }

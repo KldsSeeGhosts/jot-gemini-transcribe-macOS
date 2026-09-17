@@ -1,311 +1,366 @@
 // Copyright 2026 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
-import AppKit
 import CoreGraphics
 import Foundation
 
-/// Owns the system-wide CGEventTap that powers the bare-modifier dictation key.
-///
-/// Design (docs/design/architecture.md — HotkeyEngine):
-///  - Dedicated thread with its own CFRunLoop; the callback only classifies events,
-///    runs the pure `HotkeyProcessor` under a lock (microseconds), and forwards
-///    intents to the owner via a closure.
-///  - Consumes the configured key's flagsChanged events (that's what makes fn *ours*)
-///    and Esc key-downs, but ONLY while a session is active. Everything else passes.
-///  - Self-healing: re-enables on kCGEventTapDisabledBy* and polls tapIsEnabled
-///    every 5s — a non-nil tap is not a healthy tap.
+/// Owns one input tap per start/stop lifetime. The event callback never waits on
+/// an app lock, calls client code, or immediately revives a timed-out tap.
 public final class EventTapEngine {
     public enum State: Equatable {
         case stopped
-        /// Tap creation failed — Accessibility permission is missing.
         case permissionDenied
         case running
     }
 
-    public private(set) var state: State = .stopped
-
-    /// Called with each intent, on an arbitrary internal thread — the owner hops
-    /// to the main actor.
-    public var onIntent: ((HotkeyIntent) -> Void)?
-    /// Called when the tap had to be revived (telemetry for the #1 field failure).
-    public var onTapRevived: (() -> Void)?
-
-    private var key: HotkeyKey
     private let lock = NSLock()
-    private var processor = HotkeyProcessor()
-    private var keyIsDown = false
-    /// Set by the app while a session is in flight beyond the grammar's view
-    /// (transcribing/inserting, or UI-started hands-free) so Esc still cancels
-    /// (audit L8/L13 — the machine supported cancel, the tap never delivered it).
+    private let deliveryQueue = DispatchQueue(label: "com.ammaar.jot.hotkey.delivery")
+    private var session: HotkeyTapSession?
+    private var generation = UUID()
+    private var key: HotkeyKey
+    private var doubleTapEnabled = false
     private var externalSessionActive = false
+    private var intentHandler: ((HotkeyIntent) -> Void)?
+    private var revivedHandler: (() -> Void)?
 
-    private var tapThread: Thread?
-    private var tapPort: CFMachPort?
-    private var runLoop: CFRunLoop?
-    private let timerQueue = DispatchQueue(label: "com.ammaar.jot.hotkey.timer")
-    private var doubleTapTimer: DispatchSourceTimer?
-    private var healthTimer: DispatchSourceTimer?
-    private var startSemaphore: DispatchSemaphore?
+    public var state: State { lock.withLock { session?.state ?? .stopped } }
 
-    public init(key: HotkeyKey = .fn) {
-        self.key = key
+    /// Delivered in order on a separate serial queue, never on the input thread.
+    public var onIntent: ((HotkeyIntent) -> Void)? {
+        get { lock.withLock { intentHandler } }
+        set { lock.withLock { intentHandler = newValue } }
+    }
+    public var onTapRevived: (() -> Void)? {
+        get { lock.withLock { revivedHandler } }
+        set { lock.withLock { revivedHandler = newValue } }
     }
 
-    deinit {
-        stop()
-    }
+    public init(key: HotkeyKey = .fn) { self.key = key }
+    deinit { stop() }
 
     public func setKey(_ newKey: HotkeyKey) {
-        lock.lock()
-        // Same key ⇒ keep keyIsDown: resetting the edge detector while the user
-        // is physically holding the key would swallow the coming key-up and
-        // strand the session (reachable via any settings write re-applying
-        // hotkey config mid-hold).
-        if key != newKey {
+        lock.withLock {
             key = newKey
-            keyIsDown = false
+            session?.perform { $0.setKey(newKey) }
         }
-        lock.unlock()
     }
 
     public func setDoubleTapLockEnabled(_ enabled: Bool) {
-        lock.lock()
-        processor.doubleTapLockEnabled = enabled
-        lock.unlock()
+        lock.withLock {
+            doubleTapEnabled = enabled
+            session?.perform { $0.processor.doubleTapLockEnabled = enabled }
+        }
     }
 
-    /// The coordinator refused our .begin — the grammar's session is phantom.
     public func resetGrammar() {
-        lock.lock()
-        processor.reset()
-        lock.unlock()
+        lock.withLock { session?.perform { $0.resetGrammar() } }
     }
 
     public func setExternalSessionActive(_ active: Bool) {
-        lock.lock()
-        externalSessionActive = active
-        lock.unlock()
+        lock.withLock {
+            externalSessionActive = active
+            session?.perform { $0.externalSessionActive = active }
+        }
     }
 
-    /// Starts the tap. Returns false (state == .permissionDenied) without Accessibility trust.
-    /// Safe to call again after the user grants Accessibility (onboarding flow).
     @discardableResult
     public func start() -> Bool {
-        if state == .permissionDenied {
-            tapThread = nil
-            state = .stopped
+        lock.withLock {
+            if session?.state == .running { return true }
+            session?.stop()
+            generation = UUID()
+            let id = generation
+            let next = HotkeyTapSession(
+                key: key, doubleTapEnabled: doubleTapEnabled,
+                externalSessionActive: externalSessionActive,
+                deliveryQueue: deliveryQueue,
+                onIntent: { [weak self] intent in
+                    guard let self else { return }
+                    let handler = self.lock.withLock {
+                        self.generation == id ? self.intentHandler : nil
+                    }
+                    handler?(intent)
+                },
+                onRevived: { [weak self] in
+                    guard let self else { return }
+                    let handler = self.lock.withLock {
+                        self.generation == id ? self.revivedHandler : nil
+                    }
+                    handler?()
+                }
+            )
+            session = next
+            return next.start()
         }
-        guard tapThread == nil else { return state == .running }
+    }
 
-        let sema = DispatchSemaphore(value: 0)
-        startSemaphore = sema
-
-        let thread = Thread { [weak self] in
-            self?.threadMain()
+    public func stop() {
+        lock.withLock {
+            // Invalidate queued deliveries before tearing down the old tap.
+            generation = UUID()
+            session?.stop()
+            session = nil
+            externalSessionActive = false
         }
+    }
+}
+
+/// Grammar and its timers are confined to the tap's run loop. A separate lock
+/// protects installation/teardown only; handle() never acquires that lock.
+/// The thread retains this session, not EventTapEngine, so dropping an engine
+/// really does call deinit and remove its tap.
+final class HotkeyTapSession {
+    private let resourceLock = NSLock()
+    private var stopped = false
+    private var currentState: EventTapEngine.State = .stopped
+    private var port: CFMachPort?
+    private var runLoop: CFRunLoop?
+    private let ready = DispatchSemaphore(value: 0)
+    private let deliveryQueue: DispatchQueue
+    private let onIntent: (HotkeyIntent) -> Void
+    private let onRevived: () -> Void
+
+    private var key: HotkeyKey
+    var processor = HotkeyProcessor()
+    var externalSessionActive: Bool
+    private var keyIsDown = false
+    private var consumedKeys: Set<Int64> = []
+    private var doubleTapTimer: CFRunLoopTimer?
+    private var timerGeneration = 0
+    private var recovery = EventTapRecoveryPolicy()
+
+    var state: EventTapEngine.State { resourceLock.withLock { currentState } }
+
+    init(key: HotkeyKey, doubleTapEnabled: Bool, externalSessionActive: Bool,
+         deliveryQueue: DispatchQueue, onIntent: @escaping (HotkeyIntent) -> Void,
+         onRevived: @escaping () -> Void) {
+        self.key = key
+        processor.doubleTapLockEnabled = doubleTapEnabled
+        self.externalSessionActive = externalSessionActive
+        self.deliveryQueue = deliveryQueue
+        self.onIntent = onIntent
+        self.onRevived = onRevived
+    }
+
+    func start() -> Bool {
+        let thread = Thread { self.threadMain() }
         thread.name = "com.ammaar.jot.eventtap"
         thread.qualityOfService = .userInteractive
-        tapThread = thread
         thread.start()
-
-        // Wait briefly for the thread to report tap creation success/failure.
-        _ = sema.wait(timeout: .now() + 2.0)
-        startSemaphore = nil
-
-        if state == .running {
-            startHealthTimer()
+        guard ready.wait(timeout: .now() + 2) == .success else {
+            // A late tapCreate result may not install a zombie tap after timeout.
+            stop()
+            return false
         }
         return state == .running
     }
 
-    public func stop() {
-        doubleTapTimer?.cancel(); doubleTapTimer = nil
-        healthTimer?.cancel(); healthTimer = nil
-        if let runLoop { CFRunLoopStop(runLoop) }
-        if let tapPort { CGEvent.tapEnable(tap: tapPort, enable: false) }
-        tapPort = nil
-        runLoop = nil
-        tapThread = nil
-        state = .stopped
-        startSemaphore?.signal()
-        startSemaphore = nil
+    func stop() {
+        resourceLock.withLock {
+            stopped = true
+            currentState = .stopped
+            if let port {
+                CGEvent.tapEnable(tap: port, enable: false)
+                CFMachPortInvalidate(port)
+            }
+            if let runLoop {
+                CFRunLoopStop(runLoop)
+                CFRunLoopWakeUp(runLoop)
+            }
+        }
     }
 
-    // MARK: - Tap thread
+    func perform(_ action: @escaping (HotkeyTapSession) -> Void) {
+        resourceLock.withLock {
+            guard !stopped, let runLoop else { return }
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) { [weak self] in
+                guard let self else { return }
+                action(self)
+            }
+            CFRunLoopWakeUp(runLoop)
+        }
+    }
 
     private func threadMain() {
-        let mask: CGEventMask =
-            (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
-
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        let mask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
         guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
+            tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
             eventsOfInterest: mask,
-            callback: { _, type, event, userInfo in
-                guard let userInfo else { return Unmanaged.passUnretained(event) }
-                let engine = Unmanaged<EventTapEngine>.fromOpaque(userInfo).takeUnretainedValue()
-                return engine.handle(type: type, event: event)
+            callback: { _, type, event, context in
+                guard let context else { return Unmanaged.passUnretained(event) }
+                return Unmanaged<HotkeyTapSession>.fromOpaque(context)
+                    .takeUnretainedValue().handle(type: type, event: event)
             },
-            userInfo: selfPtr
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            Log.hotkey.error("EventTapEngine: tap creation failed — Accessibility not granted")
-            state = .permissionDenied
-            startSemaphore?.signal()
+            resourceLock.withLock { if !stopped { currentState = .permissionDenied } }
+            ready.signal()
+            Log.hotkey.error("EventTapEngine: tap creation failed")
             return
         }
-
-        tapPort = tap
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        runLoop = CFRunLoopGetCurrent()
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-        state = .running
-        startSemaphore?.signal()
-        Log.hotkey.info("EventTapEngine: tap running (key=\(self.key.rawValue, privacy: .public))")
-        CFRunLoopRun()
-        Log.hotkey.info("EventTapEngine: run loop exited")
+        CGEvent.tapEnable(tap: tap, enable: false)
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            ready.signal()
+            return
+        }
+        let loop = CFRunLoopGetCurrent()!
+        let installed = resourceLock.withLock { () -> Bool in
+            guard !stopped else { return false }
+            port = tap
+            runLoop = loop
+            CFRunLoopAddSource(loop, source, .commonModes)
+            CGEvent.tapEnable(tap: tap, enable: true)
+            currentState = .running
+            return true
+        }
+        guard installed else {
+            CFMachPortInvalidate(tap)
+            CFRunLoopSourceInvalidate(source)
+            ready.signal()
+            return
+        }
+        let health = CFRunLoopTimerCreateWithHandler(
+            kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 1, 1, 0, 0
+        ) { [weak self] _ in self?.checkHealth() }!
+        CFRunLoopAddTimer(loop, health, .commonModes)
+        ready.signal()
+        defer {
+            CFRunLoopTimerInvalidate(health)
+            disarmTimer()
+            CFRunLoopRemoveSource(loop, source, .commonModes)
+            CFRunLoopSourceInvalidate(source)
+            resourceLock.withLock {
+                CGEvent.tapEnable(tap: tap, enable: false)
+                CFMachPortInvalidate(tap)
+                port = nil
+                runLoop = nil
+                currentState = .stopped
+            }
+        }
+        // stop() can race with entering the run loop. An invalidated port never
+        // blocks input, and the bounded run avoids retaining a stopped session.
+        while !resourceLock.withLock({ stopped }) {
+            if CFRunLoopRunInMode(.defaultMode, 1, true) == .finished { break }
+        }
     }
 
-    // MARK: - Event classification (tap thread)
+    func setKey(_ newKey: HotkeyKey) {
+        guard key != newKey else { return } // preserve an in-flight key-up
+        finishInterruptedHold()
+        key = newKey
+    }
 
-    private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Tap health: the OS silently disables taps that are slow or during login events.
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tapPort {
-                CGEvent.tapEnable(tap: tapPort, enable: true)
-                Log.hotkey.warning("EventTapEngine: tap disabled by \(type == .tapDisabledByTimeout ? "timeout" : "user input", privacy: .public) — re-enabled")
-                onTapRevived?()
-            }
-            return Unmanaged.passUnretained(event)
-        }
+    func resetGrammar() {
+        processor.reset()
+        disarmTimer()
+        // Keep the physical edge and consumed key pairs until their release.
+    }
 
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+    private func finishInterruptedHold() {
+        let active = processor.isSessionActive || externalSessionActive
+        resetGrammar()
+        keyIsDown = false
+        consumedKeys.removeAll()
+        // Finalize rather than cancel: captured words must remain recoverable.
+        if active { emit(.finalize) }
+    }
+
+    func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        let pass = Unmanaged.passUnretained(event)
         let now = ProcessInfo.processInfo.systemUptime
-
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            finishInterruptedHold()
+            recovery.failed(at: now)
+            return pass // Never re-enable or call app code from this callback.
+        }
+        guard event.getIntegerValueField(.eventSourceUserData) != SyntheticEventTag.magic else {
+            return pass
+        }
+        recovery.receivedEvent(at: now)
+        let code = event.getIntegerValueField(.keyboardEventKeycode)
         switch type {
         case .flagsChanged:
-            lock.lock()
-            let configured = key
-            guard keyCode == configured.keyCode else {
-                lock.unlock()
-                return Unmanaged.passUnretained(event)
-            }
-            let isDown = configured.isDown(in: event.flags)
-            guard isDown != keyIsDown else {
-                lock.unlock()
-                return Unmanaged.passUnretained(event)
-            }
-            keyIsDown = isDown
-            let fx = processor.handle(isDown ? .hotkeyDown : .hotkeyUp, at: now)
-            lock.unlock()
-            apply(fx)
-            return nil // consume: this key is ours
-
+            guard code == key.keyCode else { return pass }
+            let down = key.isDown(in: event.flags)
+            guard down != keyIsDown else { return pass }
+            keyIsDown = down
+            apply(processor.handle(down ? .hotkeyDown : .hotkeyUp, at: now))
+            return nil
+        case .keyUp:
+            return consumedKeys.remove(code) != nil ? nil : pass
         case .keyDown:
-            // Our own synthetic events (the InsertionEngine's ⌘V) are tagged with a
-            // magic userData value and must never feed the grammar.
-            guard event.getIntegerValueField(.eventSourceUserData) != SyntheticEventTag.magic else {
-                return Unmanaged.passUnretained(event)
-            }
-            // Autorepeats are echoes, not intent: a key held down before the
-            // session started must not abort it, and repeated Space/Esc must not
-            // re-fire gestures (audit #14).
-            guard event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else {
-                return Unmanaged.passUnretained(event)
-            }
-            lock.lock()
-            // Space while the dictation key is physically held = hands-free lock.
-            // Timing-free by construction — both keys are simply down together.
-            if keyCode == 49, processor.isKeyHeld {
-                let fx = processor.handle(.spaceLock, at: now)
-                lock.unlock()
-                apply(fx)
-                return nil // the Space is a gesture, not typing
-            }
-            // Esc cancels grammar sessions AND externally-tracked ones
-            // (in-flight transcription, UI-started hands-free).
-            if keyCode == 53, externalSessionActive, !processor.isSessionActive {
-                lock.unlock()
-                onIntent?(.cancel)
+            // Swallow the ENTIRE gesture, including autorepeat and its key-up.
+            if consumedKeys.contains(code) { return nil }
+            guard event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else { return pass }
+            if code == 49, processor.isKeyHeld {
+                consumedKeys.insert(code)
+                apply(processor.handle(.spaceLock, at: now))
                 return nil
             }
-            guard processor.isSessionActive else {
-                lock.unlock()
-                return Unmanaged.passUnretained(event)
-            }
-            if keyCode == 53 { // Esc
-                let fx = processor.handle(.escDown, at: now)
-                lock.unlock()
-                apply(fx)
-                return nil // consume Esc only while dictating
-            }
-            let fx = processor.handle(.otherKeyDown, at: now)
-            lock.unlock()
-            apply(fx)
-            return Unmanaged.passUnretained(event) // typing passes through
-
-        default:
-            return Unmanaged.passUnretained(event)
-        }
-    }
-
-    private func apply(_ fx: HotkeyProcessor.Effects) {
-        // Timer lifecycle is confined to timerQueue — apply() runs on the tap
-        // thread AND the timer queue, and unsynchronized DispatchSourceTimer
-        // mutation is a crash (audit L17).
-        if fx.disarmTimer || fx.armTimer != nil {
-            let delay = fx.armTimer
-            timerQueue.async { [weak self] in
-                guard let self else { return }
-                self.doubleTapTimer?.cancel()
-                self.doubleTapTimer = nil
-                guard let delay else { return }
-                let timer = DispatchSource.makeTimerSource(queue: self.timerQueue)
-                timer.schedule(deadline: .now() + delay)
-                timer.setEventHandler { [weak self] in
-                    guard let self else { return }
-                    self.lock.lock()
-                    let fx = self.processor.handle(.doubleTapTimeout, at: ProcessInfo.processInfo.systemUptime)
-                    self.lock.unlock()
-                    self.apply(fx)
+            if code == 53, processor.isSessionActive || externalSessionActive {
+                consumedKeys.insert(code)
+                if processor.isSessionActive {
+                    apply(processor.handle(.escDown, at: now))
+                } else {
+                    emit(.cancel)
                 }
-                timer.resume()
-                self.doubleTapTimer = timer
+                return nil
             }
-        }
-        for intent in fx.intents {
-            onIntent?(intent)
+            if processor.isSessionActive {
+                apply(processor.handle(.otherKeyDown, at: now))
+            }
+            return pass
+        default:
+            return pass
         }
     }
 
-    // MARK: - Health polling
+    private func emit(_ intent: HotkeyIntent) {
+        deliveryQueue.async { [onIntent] in onIntent(intent) }
+    }
 
-    private func startHealthTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: timerQueue)
-        timer.schedule(deadline: .now() + 5, repeating: 5)
-        timer.setEventHandler { [weak self] in
-            guard let self, let tapPort = self.tapPort else { return }
-            if !CGEvent.tapIsEnabled(tap: tapPort) {
-                CGEvent.tapEnable(tap: tapPort, enable: true)
-                Log.hotkey.warning("EventTapEngine: health poll found tap disabled — re-enabled")
-                self.onTapRevived?()
+    private func disarmTimer() {
+        timerGeneration &+= 1
+        if let doubleTapTimer { CFRunLoopTimerInvalidate(doubleTapTimer) }
+        doubleTapTimer = nil
+    }
+
+    private func apply(_ effects: HotkeyProcessor.Effects) {
+        if effects.disarmTimer || effects.armTimer != nil {
+            disarmTimer()
+            if let delay = effects.armTimer {
+                let id = timerGeneration
+                let timer = CFRunLoopTimerCreateWithHandler(
+                    kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + delay, 0, 0, 0
+                ) { [weak self] _ in
+                    guard let self, self.timerGeneration == id else { return }
+                    self.apply(self.processor.handle(.doubleTapTimeout,
+                        at: ProcessInfo.processInfo.systemUptime))
+                }!
+                doubleTapTimer = timer
+                CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, .commonModes)
             }
         }
-        timer.resume()
-        healthTimer = timer
+        effects.intents.forEach(emit)
+    }
+
+    private func checkHealth() {
+        // This timer is on the grammar's run loop, but outside the input callback.
+        // Serialize enable with stop: once invalidated, a tap can never be revived.
+        resourceLock.withLock {
+            guard !stopped, let port, CFMachPortIsValid(port),
+                  !CGEvent.tapIsEnabled(tap: port) else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            if recovery.retryAt == nil {
+                finishInterruptedHold()
+                recovery.failed(at: now)
+            } else if recovery.mayRetry(at: now) {
+                CGEvent.tapEnable(tap: port, enable: true)
+                recovery.didRetry()
+                deliveryQueue.async { [onRevived] in onRevived() }
+            }
+        }
     }
 }

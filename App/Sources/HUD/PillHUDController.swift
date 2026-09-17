@@ -23,6 +23,7 @@ import JotCore
 final class PillHUDController {
     let model = PillModel()
     private let panel: NSPanel
+    private let hostingView: PillHostingView<PillRootView>
 
     init() {
         panel = NSPanel(
@@ -40,9 +41,14 @@ final class PillHUDController {
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.acceptsMouseMovedEvents = true
-        panel.contentView = NSHostingView(
-            rootView: PillRootView(model: model)
-        )
+        let hosting = PillHostingView(rootView: PillRootView(model: model))
+        // The pill reports where it actually is inside the 600×96 stage; the
+        // hosting view only accepts events there (see PillHostingView.hitTest).
+        hosting.rootView.onPillFrameChange = { [weak hosting] frame in
+            hosting?.pillFrame = frame
+        }
+        hostingView = hosting
+        panel.contentView = hosting
         reposition()
     }
 
@@ -103,15 +109,59 @@ final class PillHUDController {
     }
 }
 
+/// NSHostingView that only accepts events where the pill actually is.
+///
+/// AppKit delivers clicks to a window's whole FRAME — transparency does not
+/// make a clear panel click-through, and NSHostingView consumes whatever it is
+/// given. Unchecked, this panel's fixed 600×96 stage (bottom-center of the
+/// screen, joined to every space, at screenSaver level — and visible whenever
+/// the resting dot is on, which is the default) swallowed every click aimed at
+/// anything underneath: a strip of "dead" UI with no visual explanation.
+/// The pill reports its live bounds via preference; outside them, hitTest
+/// returns nil and the event passes through to whatever the user clicked.
+private final class PillHostingView<Content: View>: NSHostingView<Content> {
+    /// The pill's bounds in this view's coordinate space (top-left origin:
+    /// SwiftUI named spaces and this flipped view agree). nil/empty = the pill
+    /// isn't showing anything interactive — pass everything through.
+    var pillFrame: CGRect?
+    /// Edges are hard to hit exactly; a few points of grace keeps the dot's
+    /// generous hover target feeling continuous with its contentShape.
+    private let slop: CGFloat = 6
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let pillFrame, !pillFrame.isEmpty,
+              pillFrame.insetBy(dx: -slop, dy: -slop).contains(point) else { return nil }
+        return super.hitTest(point)
+    }
+}
+
 private struct PillRootView: View {
     @ObservedObject var model: PillModel
+    var onPillFrameChange: (CGRect) -> Void = { _ in }
+
+    private struct PillFrameKey: PreferenceKey {
+        static var defaultValue: CGRect = .zero
+        static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+            value = nextValue()
+        }
+    }
 
     var body: some View {
         VStack {
             Spacer(minLength: 0)
             PillView(model: model)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(
+                            key: PillFrameKey.self,
+                            value: geo.frame(in: .named("hudStage"))
+                        )
+                    }
+                )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .padding(.bottom, 8)
+        .coordinateSpace(name: "hudStage")
+        .onPreferenceChange(PillFrameKey.self) { onPillFrameChange($0) }
     }
 }

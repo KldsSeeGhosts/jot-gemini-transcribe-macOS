@@ -34,12 +34,15 @@ final class MainWindowController: NSWindowController {
         model = MainWindowModel()
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 880, height: 580),
-            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = model.selection.title
         window.titlebarAppearsTransparent = true
+        // The SwiftUI root declares minWidth 880 / minHeight 580 — mirror it in
+        // AppKit so an interactive resize can never clip controls out of reach.
+        window.contentMinSize = NSSize(width: 880, height: 580)
         window.center()
         super.init(window: window)
         // System Settings idiom: the titlebar names the selected pane (the app
@@ -60,8 +63,13 @@ final class MainWindowController: NSWindowController {
 
     func show(section: MainSection) {
         model.selection = section
-        showWindow(nil)
+        // Activate BEFORE ordering the window front: an accessory app that
+        // shows first and activates after can end up with an inactive window,
+        // and controls in an inactive window eat the first click (activation
+        // only) — every button then behaves as if it needs two presses.
         NSApp.activate(ignoringOtherApps: true)
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
     }
 }
 

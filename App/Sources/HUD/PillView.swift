@@ -51,7 +51,13 @@ struct PillView: View {
 
         case .idleDot:
             IdleDotView()
-                .padding(.vertical, 20) // stable panel hit area
+                // Stable panel hit area — and the reported bounds the panel's
+                // click-through gate accepts events in. The dot's contentShape
+                // deliberately spreads 2.4× wider than the 40pt rest state
+                // (96pt); the horizontal padding keeps that whole generous
+                // target inside the gate rather than shearing off its edges.
+                .padding(.vertical, 20)
+                .padding(.horizontal, 30)
 
         case .listening(let locked):
             // Live mode: the pill grows to carry the words as they arrive. Capped

@@ -22,6 +22,21 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 xcodegen generate
+# Passing DEVELOPMENT_TEAM=<your team> is the documented way to build under
+# your own identity — but the Debug config above hard-forces ad-hoc signing
+# (so clean clones with no Apple account still build). CLI build settings
+# outrank the project file, so when a real team is requested, flip the style
+# and identity too. An ad-hoc build is re-signed on every rebuild and TCC
+# keys Accessibility on the signature: without this, every rebuild silently
+# strands the previous grant.
+TEAM_SIGNING_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    DEVELOPMENT_TEAM=?*)
+      TEAM_SIGNING_ARGS+=(CODE_SIGN_STYLE=Automatic CODE_SIGN_IDENTITY="Apple Development")
+      ;;
+  esac
+done
 # Some corporate-managed git configs set safe.bareRepository=explicit, which
 # breaks SPM's bare clone cache.
 exec env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all \
@@ -30,4 +45,4 @@ exec env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALU
     -scheme Jot \
     -configuration Debug \
     -destination 'platform=macOS,arch=arm64' \
-    -quiet "$@"
+    -quiet "$@" ${TEAM_SIGNING_ARGS[@]+"${TEAM_SIGNING_ARGS[@]}"}

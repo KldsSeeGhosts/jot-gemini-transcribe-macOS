@@ -262,8 +262,10 @@ final class DictationController {
 
     private func presentOnboarding() {
         guard onboardingWindow == nil else {
-            onboardingWindow?.showWindow(nil)
+            // Activate first: an inactive window eats the first click on every
+            // control (see MainWindowController.show).
             NSApp.activate(ignoringOtherApps: true)
+            onboardingWindow?.showWindow(nil)
             return
         }
         let window = OnboardingWindowController(
@@ -289,14 +291,26 @@ final class DictationController {
             latestRecord: { [historyStore] in historyStore?.records(limit: 1).first }
         )
         onboardingWindow = window
-        window.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+        window.showWindow(nil)
+        window.window?.makeKeyAndOrderFront(nil)
     }
 
     /// Names the first missing prerequisite — never leaves the construction
     /// placeholder ("Starting up…") in the menu bar.
     private func reportSetupIncomplete() {
         if !AXIsProcessTrusted() {
+            // The signature is the first thing to check when a grant "doesn't
+            // stick": an ad-hoc debug build is re-signed per rebuild and TCC
+            // keys on it, so yesterday's grant can't match today's binary.
+            let signing = CodeSigningInfo.current()
+            let cdhash = signing?.cdhash.map { String($0.prefix(16)) } ?? "?"
+            Log.ui.error("""
+            Accessibility not trusted — signing: adhoc=\(signing?.adHoc ?? false) \
+            team=\(signing?.teamID ?? "none") cdhash=\(cdhash). \
+            An ad-hoc rebuild strands earlier grants (remove old entries in \
+            Privacy & Security › Accessibility and re-grant).
+            """)
             onStatusChange?("Grant Accessibility to enable the dictation key")
         } else if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
             onStatusChange?("Allow microphone access in System Settings to dictate")

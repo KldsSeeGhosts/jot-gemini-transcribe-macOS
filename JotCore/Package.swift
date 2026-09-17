@@ -27,16 +27,21 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "ObjCExceptionGuard",
+            path: "ObjCExceptionGuard"
+        ),
+        .target(
             name: "JotCore",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
                 "Sauce",
+                "ObjCExceptionGuard",
             ],
             path: "Sources"
         ),
         .testTarget(
             name: "JotCoreTests",
-            dependencies: ["JotCore"],
+            dependencies: ["JotCore", "ObjCExceptionGuard"],
             path: "Tests"
         ),
     ]

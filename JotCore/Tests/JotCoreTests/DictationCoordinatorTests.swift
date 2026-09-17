@@ -266,6 +266,17 @@ final class DictationCoordinatorTests: XCTestCase {
         XCTAssertNotNil(discarded)
     }
 
+    func testTapInstallFailureReportsAudioFailure() async {
+        let c = makeCoordinator()
+        capture.startError = AudioCaptureEngine.CaptureError.tapInstall("HAL device disappeared")
+        var discarded: UUID?
+        c.onSessionDiscard = { discarded = $0 }
+        c.handle(.begin)
+        await pump()
+        XCTAssertEqual(c.state, .failed(.audio))
+        XCTAssertNotNil(discarded)
+    }
+
     func testTranscriptionAuthFailure() async {
         var t = FakeTranscription()
         t.result = .failure(.auth)

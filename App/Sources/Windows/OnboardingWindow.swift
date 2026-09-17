@@ -649,9 +649,24 @@ private struct AccessibilityScreen: View {
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
                 }
                 if slowGrant && !granted {
-                    Text("Granted but not detected? A relaunch may be needed.")
-                        .font(JotUI.TypeScale.labelSmall())
-                        .foregroundStyle(JotUI.Colors.onSurfaceVariant)
+                    // An ad-hoc (Debug) build is re-signed on every rebuild, and
+                    // TCC keys the grant on that signature — so System Settings
+                    // shows the OLD entry switched on while THIS binary is still
+                    // untrusted. "Relaunch" advice sends people in circles;
+                    // name the actual fix. Team-signed builds keep a stable
+                    // identity and get the plain relaunch hint.
+                    if CodeSigningInfo.current()?.adHoc == true {
+                        Text("This debug build is re-signed on every rebuild, so an earlier grant no longer matches it. In Accessibility settings, remove the old Jot entries with ⌫, then press Grant again.")
+                            .font(JotUI.TypeScale.labelSmall())
+                            .foregroundStyle(JotUI.Colors.onSurfaceVariant)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: 360)
+                    } else {
+                        Text("Granted but not detected? A relaunch may be needed.")
+                            .font(JotUI.TypeScale.labelSmall())
+                            .foregroundStyle(JotUI.Colors.onSurfaceVariant)
+                    }
                 }
                 PrimaryButton(title: "Continue", disabled: !granted, action: onNext)
             }

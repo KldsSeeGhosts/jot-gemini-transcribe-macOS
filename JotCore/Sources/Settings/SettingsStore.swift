@@ -211,18 +211,19 @@ public struct SettingsStore: Sendable {
     }
 
     /// Stream audio to the Live API over a WebSocket and show words as they are
-    /// spoken, instead of uploading the clip at key-up.
+    /// spoken, instead of uploading the clip at key-up. The socket is kept
+    /// warm while idle (WarmSocketPool), so the hot path pays no connect.
     ///
-    /// Experimental and off by default. It is a genuinely different transport
-    /// with a genuinely different failure surface — a socket can die mid-sentence
-    /// where an upload either succeeds or does not — so it earns its way on by
-    /// dogfooding, not by being the new default.
+    /// On by default: it is the reference behaviour — stream while holding,
+    /// commit on release. The escape hatch stays in Settings → Experimental.
     ///
     /// Turning this on never risks words. The CAF is written exactly as before,
     /// and a live stream that ends any way other than cleanly is discarded in
     /// favour of the batch upload over that file.
     public var liveTranscription: Bool {
-        Self.defaults.bool(forKey: "liveTranscription")
+        // On unless explicitly switched off: the warm socket + stream-while-
+        // holding path is the fast path, and the CAF upload still backs it.
+        Self.defaults.object(forKey: "liveTranscription") as? Bool ?? true
     }
 
     public func setLiveTranscription(_ enabled: Bool) {

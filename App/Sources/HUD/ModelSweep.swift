@@ -45,6 +45,11 @@ struct ModelSweep: ViewModifier {
 
     @State private var phase: CGFloat = 1.4      // background-position: 140%
     @State private var sweeping = false
+    /// The pending "settle into ink" step. A re-run cancels it so the first
+    /// sweep's cleanup can never fire mid-second-sweep and park the gradient
+    /// over the text — the frozen-rainbow bug. Task cancellation is the guard
+    /// the old asyncAfter+token stack was approximating.
+    @State private var settleTask: Task<Void, Never>?
 
     func body(content: Content) -> some View {
         content
@@ -67,11 +72,25 @@ struct ModelSweep: ViewModifier {
                 }
             }
             .onChange(of: trigger) { _, newValue in
-                guard !newValue.isEmpty else { return }
+                // Empty means the session ended and the pill moved on — the
+                // overlay must die with the text it was sweeping, not linger
+                // parked over whatever renders next.
+                guard !newValue.isEmpty else {
+                    settleTask?.cancel()
+                    sweeping = false
+                    return
+                }
                 run()
             }
             .onAppear {
                 if !trigger.isEmpty { run() }
+            }
+            // The view being torn down mid-sweep leaves @State behind, but the
+            // pending task is still owned by it — cancel on disappear so a dead
+            // view's timer cannot write into a recycled identity.
+            .onDisappear {
+                settleTask?.cancel()
+                settleTask = nil
             }
     }
 
@@ -83,14 +102,18 @@ struct ModelSweep: ViewModifier {
             sweeping = false
             return
         }
+        settleTask?.cancel()
         phase = 1.4
         sweeping = true
         withAnimation(.timingCurve(0.3, 0.5, 0.2, 1.0, duration: Self.duration)) {
             phase = -0.2                          // background-position: -20%
         }
         // Then it settles into ink — the site removes the class rather than
-        // leaving the gradient parked over the text.
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.duration) {
+        // leaving the gradient parked over the text. Kept on a Task so a re-run
+        // cancels the stale settle instead of stacking it.
+        settleTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(Self.duration * 1_000_000_000))
+            guard !Task.isCancelled else { return }
             sweeping = false
         }
     }

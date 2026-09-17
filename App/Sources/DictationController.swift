@@ -25,6 +25,9 @@ final class DictationController {
     let coordinator: DictationCoordinator
     /// Idle-time capture-graph prewarming — the key press pays only start().
     private let warmEngines = WarmEnginePool()
+    /// Idle-time transcription socket — the key press pays no connect or
+    /// session handshake. Same warm trick as the audio graph, on the other end.
+    private let warmSockets = WarmSocketPool()
     private let engine = EventTapEngine(key: .fn)
     private let hud = PillHUDController()
     private let earcons = EarconPlayer()
@@ -52,7 +55,7 @@ final class DictationController {
     /// needs both OAuth authentication and the Dictionary, and the coordinator should
     /// know about neither.
     @MainActor
-    private static func makeLiveSession(context: DictationContext) -> LiveTranscribing? {
+    private static func makeLiveSession(context: DictationContext, warmSockets: WarmSocketPool) -> LiveTranscribing? {
         let settings = SettingsStore()
         guard settings.liveTranscriptionActive else { return nil }
         // A live path that is reliably broken is worse than one that is off: every
@@ -71,27 +74,56 @@ final class DictationController {
         let dictionary = DictionaryStore()
         let config = settings.openAIConfig
         let oauth = OpenAIOAuthStore()
+        let setup = LiveSetup(
+            model: config.liveModel,
+            prompt: OpenAITranscriptionService.transcriptionPrompt(
+                settings: settings,
+                context: context,
+                dictionary: dictionary
+            ),
+            // The same terms the batch path biases with, so switching modes
+            // does not quietly change how someone's name gets spelled.
+            customVocabulary: dictionary.sanitizedVocabulary()
+        )
+        // The pool keeps one socket connected and session.updated'd while idle.
+        // acquireNow() returns nil when nothing is warm — first dictation after
+        // launch, or a socket that died — and the session's own cold transport
+        // covers that. The pool is told to top itself back up on handoff.
+        let warmTransport = warmSockets.acquireNow()
         let session = LiveTranscriptionSession(
             transport: WebSocketTransport(authHeaders: {
                 try await oauth.authorizationHeaders()
             }),
-            setup: LiveSetup(
-                model: config.liveModel,
-                prompt: OpenAITranscriptionService.transcriptionPrompt(
-                    settings: settings,
-                    context: context,
-                    dictionary: dictionary
-                ),
-                // The same terms the batch path biases with, so switching modes
-                // does not quietly change how someone's name gets spelled.
-                customVocabulary: dictionary.sanitizedVocabulary()
-            )
+            setup: setup
         )
         return LiveTranscriber(
             session: session,
             modelID: config.liveModel,
-            replacementRules: { DictionaryStore().replacementRules() }
+            replacementRules: { DictionaryStore().replacementRules() },
+            warmTransport: warmTransport
         )
+    }
+
+    /// Configure + kick the socket pool to match the current setting and login.
+    /// Called at launch and whenever the relevant settings change. With live
+    /// mode on this is also the earliest we can burn a socket for nothing —
+    /// so it is only prewarmed once credentials actually exist.
+    @MainActor
+    private func configureWarmSockets() {
+        let settings = SettingsStore()
+        guard settings.liveTranscriptionActive, OpenAIOAuthStore.hasLocalLogin() else {
+            Task { await warmSockets.configure(nil) }
+            return
+        }
+        let oauth = OpenAIOAuthStore()
+        Task {
+            await warmSockets.configure(WarmSocketPool.Configuration(
+                makeTransport: {
+                    WebSocketTransport(authHeaders: { try await oauth.authorizationHeaders() })
+                }
+            ))
+            await warmSockets.prewarm()
+        }
     }
 
     init() {
@@ -116,7 +148,9 @@ final class DictationController {
                     targetPID: app?.processIdentifier
                 )
             },
-            makeLiveSession: Self.makeLiveSession(context:)
+            makeLiveSession: { [warmSockets] context in
+                Self.makeLiveSession(context: context, warmSockets: warmSockets)
+            }
         )
     }
 
@@ -244,6 +278,7 @@ final class DictationController {
                 // Clear a lingering attention icon (auth failure, missing key).
                 onStatusItemState?(.idle)
                 warmEngines.prewarmNext()
+                configureWarmSockets()
             }
             hud.show()
             // Only now does a pill exist to paint into. Called here rather than in
@@ -357,6 +392,9 @@ final class DictationController {
                 onStatusChange?("Sign in to OpenAI with Pi or Codex")
                 onStatusItemState?(.attention)
             }
+            configureWarmSockets()
+        case "liveTranscription", "liveModelOverride":
+            configureWarmSockets()
         default:
             break
         }
@@ -635,6 +673,12 @@ final class DictationController {
             correctionDeferral?.cancel()
             correctionDeferral = nil
             correctionHoldUntil = .distantPast
+            // A new dictation abandons the previous sweep outright — clear the
+            // pill's copy here, where the hold is already dead, rather than
+            // relying on the published empty transcript racing it.
+            hud.model.partial = ""
+            hud.model.corrected = ""
+            hud.model.correction = []
             sessionStartedAt = Date()
             earcons.play(.start)
             hud.repositionToActiveScreen() // follow the dictation display (audit L14)

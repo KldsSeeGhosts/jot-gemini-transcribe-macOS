@@ -104,9 +104,18 @@ public final class DictationCoordinator: ObservableObject {
             guard oldValue?.id != session?.id else { return }
             partialPump?.cancel()
             partialPump = nil
-            partialTranscript = ""
-            correctedTranscript = ""
-            correctionSegments = []
+            // A successful live session ends with corrected/partial still on the
+            // pill and the sweep still travelling — blanking them HERE, in the
+            // same tick as session end, is what tears the text out from under
+            // the animation. Those fields are therefore cleared at the START of
+            // the next session instead of the end of this one (see beginSession):
+            // a fast second dictation resets them before any partial can paint,
+            // and the sweep gets its full run in between. Sessions that end
+            // without a result still clear here — nothing is being held up.
+            if correctedTranscript.isEmpty {
+                partialTranscript = ""
+                correctionSegments = []
+            }
             lastInterim = ""
             guard let live = liveSession else { return }
             liveSession = nil
@@ -324,6 +333,14 @@ public final class DictationCoordinator: ObservableObject {
             // Fresh room profile per session, and the meter is publishing again
             // (captureTrailingSpeech turned it off for the previous finalize).
             levelState.reset()
+            // Display state resets at START, not end: the previous session's
+            // correction sweep may still be finishing as this key goes down,
+            // and clearing here guarantees the new session's partials start from
+            // a blank guess without tearing the animation that is still playing.
+            partialTranscript = ""
+            correctedTranscript = ""
+            correctionSegments = []
+            lastInterim = ""
             noiseHandlingActive = noiseHandlingEnabled()
 
             let capture = audioFactory()

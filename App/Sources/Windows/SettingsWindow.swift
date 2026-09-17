@@ -356,7 +356,7 @@ struct DictationPane: View {
                 Text("Experimental")
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Tone guides the transcription style for email, chat, or code. Loud rooms judges your voice against the room noise. Live streams your voice as you speak and falls back by replaying the saved recording through Realtime. All are off by default.")
+                    Text("Tone guides the transcription style for email, chat, or code. Loud rooms judges your voice against the room noise. Live streams your voice as you speak over a socket kept warm while idle, and falls back by replaying the saved recording through Realtime. Live is on by default; the rest are off.")
                     if let summary = LiveStats().summary {
                         Text(summary)
                     }

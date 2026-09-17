@@ -21,6 +21,9 @@ public protocol LiveTransport: AnyObject, Sendable {
     func connect() async throws
     func send(_ data: Data) async throws
     func receive() async throws -> Data
+    /// Protocol-level keepalive. Throws on a dead socket; never consumes a
+    /// frame destined for the session the way a liveness receive() would.
+    func ping() async throws
     func close()
 }
 
@@ -56,7 +59,11 @@ public actor LiveTranscriptionSession {
         case endActivity
     }
 
-    private let transport: LiveTransport
+    /// The live socket. Starts as the session's own cold transport; resume()
+    /// swaps in a warm one. `coldTransport` keeps the original so a failed
+    /// adoption can hand the session its fallback back.
+    private var transport: LiveTransport
+    private let coldTransport: LiveTransport
     private let setup: LiveSetup
     public let ring: PCMRing
 
@@ -84,6 +91,7 @@ public actor LiveTranscriptionSession {
 
     public init(transport: LiveTransport, setup: LiveSetup, ring: PCMRing = PCMRing()) {
         self.transport = transport
+        self.coldTransport = transport
         self.setup = setup
         self.ring = ring
         // Control items must never be dropped, so this stream is unbounded — it
@@ -104,16 +112,46 @@ public actor LiveTranscriptionSession {
     public func start(setupTimeout: TimeInterval = 5.0) async throws {
         try await transport.connect()
         try await transport.send(LiveProtocol.setupFrame(setup))
+        try await awaitSetup(setupTimeout)
+        startPumps()
+    }
 
-        // Wait for setupComplete before streaming. Audio arriving meanwhile is
-        // already accumulating in the ring, so nothing is lost by waiting.
-        //
-        // Every receive is raced against the clock. Checking the deadline only
-        // between receives would not bound anything: a socket that connects and
-        // then says nothing — a proxy holding the upgrade, a server that accepted
-        // the TCP connection and stalled — parks here for the transport's own
-        // 30s timeout, and dictation cannot fall back to the batch path until
-        // this returns. The bound has to be on the wait itself.
+    /// Adopts a socket the WarmSocketPool already connected, so a key press
+    /// pays no TCP+TLS connect or auth round-trip — only the in-band
+    /// session.update this dictation's own prompt needs. Returns false when the
+    /// session is already past the point where a socket could be attached; the
+    /// caller then cold-starts on its own transport instead.
+    ///
+    /// The warm socket is connected but deliberately NOT configured: the pool
+    /// knows no session's prompt or dictionary, so reconfiguration happens here,
+    /// where the real LiveSetup exists. Audio queued before this call is already
+    /// in the ring, so nothing is lost by the handoff.
+    public func resume(warmTransport: LiveTransport, setupTimeout: TimeInterval = 5.0) async throws -> Bool {
+        guard !didSetup, !closed else { return false }
+        transport = warmTransport
+        try await transport.send(LiveProtocol.setupFrame(setup))
+        try await awaitSetup(setupTimeout)
+        startPumps()
+        return true
+    }
+
+    /// Hands the session its own cold transport back after a warm adoption
+    /// failed. The warm socket may have set failure or left didSetup true with
+    /// nothing behind it; both are cleared so a subsequent start() is a genuine
+    /// cold start, not a retry on a corpse. Audio already in the ring is kept —
+    /// it is the user's words, and the cold path still needs it.
+    public func resetToColdStart() {
+        guard !closed, sendLoop == nil else { return }
+        transport = coldTransport
+        failure = nil
+        didSetup = false
+    }
+
+    /// The bounded wait for session.updated, shared by cold start and by the
+    /// pool's warm build. Audio arriving meanwhile is already accumulating in
+    /// the ring, so nothing is lost by waiting. The bound is on the wait itself
+    /// — a socket that connects then stalls must not park the batch fallback.
+    private func awaitSetup(_ setupTimeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(setupTimeout)
         while Date() < deadline {
             let remaining = deadline.timeIntervalSinceNow
@@ -131,8 +169,6 @@ public actor LiveTranscriptionSession {
             break
         }
         guard didSetup else { throw LiveError.setupTimedOut }
-
-        startPumps()
     }
 
     /// Races a receive against a deadline. Returns the frame, or throws

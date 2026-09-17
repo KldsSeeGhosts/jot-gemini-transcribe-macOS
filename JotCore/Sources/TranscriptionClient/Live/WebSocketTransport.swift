@@ -39,6 +39,13 @@ public final class WebSocketTransport: LiveTransport, @unchecked Sendable {
         self.session = URLSession(configuration: config)
     }
 
+    /// `URLSessionWebSocketTask.resume()` is fire-and-forget: it returns before
+    /// the 101 upgrade completes, so "connect" here only starts it. The first
+    /// send/receive is what actually waits on the handshake — and on a stalled
+    /// upgrade it can suspend with no timeout. That is the freeze: an operation
+    /// the caller believes is bounded by its own race is not, because the send
+    /// itself is where the hang lives. Every socket op is therefore wrapped in
+    /// a hard bound, not just the receives.
     public func connect() async throws {
         var request = URLRequest(url: URL(string: Self.endpoint)!)
         for (name, value) in try await authHeaders() {
@@ -52,7 +59,12 @@ public final class WebSocketTransport: LiveTransport, @unchecked Sendable {
     public func send(_ data: Data) async throws {
         let task = withTask { $0 }
         guard let task else { throw LiveError.setupTimedOut }
-        try await task.send(.string(String(decoding: data, as: UTF8.self)))
+        // A dead or still-handshaking socket can park send() on buffer space
+        // that never frees. Bound it so a stalled socket fails like a refused
+        // one — the caller falls back instead of hanging the session.
+        try await Self.withTimeout(Self.sendTimeout) {
+            try await task.send(.string(String(decoding: data, as: UTF8.self)))
+        }
     }
 
     public func receive() async throws -> Data {
@@ -75,6 +87,42 @@ public final class WebSocketTransport: LiveTransport, @unchecked Sendable {
             return current
         }
         task?.cancel(with: .goingAway, reason: nil)
+    }
+
+    /// WebSocket-level keepalive ping. Throws promptly on a dead socket —
+    /// which is the whole reason the pool pings — and costs a pong on a live
+    /// one. Unlike receive() it cannot eat a frame destined for the session.
+    public func ping() async throws {
+        let task = withTask { $0 }
+        guard let task else { throw LiveError.setupTimedOut }
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            task.sendPing { error in
+                if let error { c.resume(throwing: error) } else { c.resume() }
+            }
+        }
+    }
+
+    /// Long enough for a healthy socket, short enough that a stalled one fails
+    /// before the user decides the app is frozen.
+    private static let sendTimeout: TimeInterval = 5
+
+    /// Races an operation against a hard deadline and cancels the loser.
+    /// Unlike the session's setup receive-race, this bounds the op that is
+    /// actually capable of suspending forever.
+    private static func withTimeout<T>(
+        _ seconds: TimeInterval,
+        _ operation: @escaping () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw LiveError.setupTimedOut
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw LiveError.setupTimedOut }
+            return first
+        }
     }
 
     private func withTask<T>(

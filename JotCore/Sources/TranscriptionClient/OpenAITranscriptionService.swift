@@ -63,6 +63,17 @@ public struct OpenAITranscriptionService: TranscriptionServicing {
                     setup: setup,
                     deadline: TimeoutPolicy.overallDeadline(audioDuration: durationSeconds)
                 )
+            case .auth:
+                // A token can be invalidated server-side while the stored
+                // expiry still reads fresh, so a refused credential is retried
+                // once against a forced refresh (or a different credential
+                // source) before the dictation is allowed to fail.
+                raw = try await transcribeOnce(
+                    audioURL: audioURL,
+                    setup: setup,
+                    deadline: TimeoutPolicy.overallDeadline(audioDuration: durationSeconds),
+                    useFreshToken: true
+                )
             default:
                 throw error
             }
@@ -122,10 +133,13 @@ public struct OpenAITranscriptionService: TranscriptionServicing {
     private func transcribeOnce(
         audioURL: URL,
         setup: LiveSetup,
-        deadline: TimeInterval
+        deadline: TimeInterval,
+        useFreshToken: Bool = false
     ) async throws -> String {
         let transport = WebSocketTransport(authHeaders: {
-            try await oauth.authorizationHeaders()
+            useFreshToken
+                ? try await oauth.forceAuthorizationHeaders()
+                : try await oauth.authorizationHeaders()
         })
         do {
             try await transport.connect()

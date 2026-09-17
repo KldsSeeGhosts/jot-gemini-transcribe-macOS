@@ -28,15 +28,26 @@ final class LiveTranscriptionSessionTests: XCTestCase {
         var connectError: Error?
         var sendErrorAfter: Int?
         var receiveHangs = false
+        /// Simulates a socket that never completes a send — the freeze case.
+        var hangSend = false
         private(set) var closeCount = 0
 
         init(script: [Data]) { self.inbox = script }
 
+        private(set) var connectCount = 0
         func connect() async throws {
+            lock.lock(); connectCount += 1; lock.unlock()
             if let connectError { throw connectError }
         }
 
         func send(_ data: Data) async throws {
+            if hangSend {
+                // Long enough to prove begin() would hang without a bound —
+                // short enough to keep the suite fast. A real socket parks here
+                // forever; the fake just proves the path returns.
+                try await Task.sleep(nanoseconds: 6_000_000_000)
+                throw URLError(.timedOut)
+            }
             lock.lock()
             let count = sent.count
             let limit = sendErrorAfter
@@ -63,6 +74,9 @@ final class LiveTranscriptionSessionTests: XCTestCase {
         }
 
         func close() { lock.lock(); closeCount += 1; lock.unlock() }
+
+        var pingError: Error?
+        func ping() async throws { if let pingError { throw pingError } }
 
         /// What was actually put on the wire, in order, as decoded JSON keys.
         var sentKinds: [String] {
@@ -289,5 +303,57 @@ final class LiveTranscriptionSessionTests: XCTestCase {
         guard case .unusable = outcome else {
             return XCTFail("whitespace-only text must not be inserted, got \(outcome)")
         }
+    }
+
+    // MARK: - Adopting a warm socket
+
+    /// The whole point of the pool: a resumed session never connects or sends
+    /// setup again — it goes straight to audio.
+    func testResumeSkipsConnectAndSetup() async throws {
+        // The cold transport is deliberately unusable; if resume leaked a
+        // connect to it the session would die. Only the warm transport's frames
+        // are scripted, because only it should ever be touched.
+        let cold = FakeTransport(script: [])
+        cold.connectError = URLError(.cannotConnectToHost)
+        let warm = FakeTransport(script: [setupCompleteFrame(), finalFrame("warm words")])
+        let session = makeSession(cold)
+
+        let adopted = try await session.resume(warmTransport: warm)
+        XCTAssertTrue(adopted, "a fresh session must adopt a warm socket")
+        session.enqueue(Data(repeating: 0x07, count: 3_328))
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let outcome = await session.finish(deadline: 1.0)
+
+        XCTAssertEqual(outcome, .completed("warm words"))
+        XCTAssertEqual(warm.connectCount, 0, "warm socket must not be reconnected")
+        XCTAssertEqual(cold.connectCount, 0, "cold transport must never be touched after adoption")
+        // The warm socket is connected only — this session still sends its own
+        // session.update (prompt, dictionary), just without the TCP/TLS cost.
+        XCTAssertEqual(warm.sentKinds.first, "setup", "resume still configures the adopted socket in-band")
+    }
+
+    /// Audio queued before adoption is buffered in the ring, not lost — the
+    /// send loop must still see it once the pumps open on the warm socket.
+    func testAudioQueuedBeforeResumeStillStreams() async throws {
+        let cold = FakeTransport(script: [])
+        let warm = FakeTransport(script: [setupCompleteFrame(), finalFrame("early audio")])
+        let session = makeSession(cold)
+        session.enqueue(Data(repeating: 0x08, count: 3_328))
+        _ = try await session.resume(warmTransport: warm)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        _ = await session.finish(deadline: 1.0)
+        XCTAssertEqual(warm.sentKinds.filter { $0 == "audio" }.count, 1)
+    }
+
+    /// Once a session has cold-started it must not silently swap sockets —
+    /// the second connect attempt is refused and the caller cold-starts a
+    /// different session instead.
+    func testResumeRefusedAfterStart() async throws {
+        let cold = FakeTransport(script: [setupCompleteFrame(), finalFrame("cold")])
+        let warm = FakeTransport(script: [])
+        let session = makeSession(cold)
+        try await session.start()
+        let adopted = try await session.resume(warmTransport: warm)
+        XCTAssertFalse(adopted, "a started session must refuse a socket swap")
     }
 }

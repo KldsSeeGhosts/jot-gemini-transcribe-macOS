@@ -60,6 +60,8 @@ public protocol LiveTranscribing: AnyObject, Sendable {
 public final class LiveTranscriber: LiveTranscribing, @unchecked Sendable {
 
     private let session: LiveTranscriptionSession
+    /// The warm socket to adopt at begin(), or nil on the cold path.
+    private var warmTransport: LiveTransport?
     private let replacementRules: @Sendable () -> [ReplacementEngine.Rule]
     private let postProcess: (@Sendable (String) async -> String)?
     private let modelID: String
@@ -69,18 +71,39 @@ public final class LiveTranscriber: LiveTranscribing, @unchecked Sendable {
                 modelID: String,
                 replacementRules: @escaping @Sendable () -> [ReplacementEngine.Rule],
                 postProcess: (@Sendable (String) async -> String)? = nil,
-                stats: LiveStats = LiveStats()) {
+                stats: LiveStats = LiveStats(),
+                warmTransport: LiveTransport? = nil) {
         self.session = session
         self.modelID = modelID
         self.replacementRules = replacementRules
         self.postProcess = postProcess
         self.stats = stats
+        self.warmTransport = warmTransport
     }
 
     /// Partials for the HUD. Nothing here may become the transcript.
     public var partials: AsyncStream<String> { session.partials }
 
     public func begin() async throws {
+        // Warm path: the pool already connected and handshook this socket, so
+        // the dictation pays no connect or setup round-trip. If resume refuses
+        // — the session is somehow already started or closed — fall through to
+        // the cold start, which is still correct, just slower.
+        if let warm = warmTransport {
+            warmTransport = nil
+            do {
+                if try await session.resume(warmTransport: warm) {
+                    return
+                }
+            } catch {
+                // A warm socket whose setup was refused or timed out is a dead
+                // socket, not a dead dictation — restore the cold transport and
+                // fall through to a genuine cold start.
+                Log.transcription.info("warm socket setup failed (\(error, privacy: .public)) — cold-starting")
+                await session.resetToColdStart()
+            }
+            warm.close()
+        }
         do {
             try await session.start()
         } catch {
@@ -133,6 +156,10 @@ public final class LiveTranscriber: LiveTranscribing, @unchecked Sendable {
     }
 
     public func abort() async {
+        // An unadopted warm socket still sitting here is the pool's orphan:
+        // the pool forgot it at handoff, so nobody else will ever close it.
+        warmTransport?.close()
+        warmTransport = nil
         await session.abort()
     }
 }

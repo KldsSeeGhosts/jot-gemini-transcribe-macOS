@@ -52,11 +52,15 @@ final class LiveFallbackTests: XCTestCase {
     /// real one against a scripted socket, because the reconciliation is the
     /// single check standing between a fluent partial transcript and the user's
     /// cursor.
-    private func makeTranscriber(script: [Data], ring: PCMRing = PCMRing())
+    private func makeTranscriber(script: [Data], ring: PCMRing = PCMRing(),
+                                 warmTransport: LiveTranscriptionSessionTests.FakeTransport? = nil)
         -> (LiveTranscriber, LiveTranscriptionSessionTests.FakeTransport) {
         let transport = LiveTranscriptionSessionTests.FakeTransport(script: script)
         let session = LiveTranscriptionSession(transport: transport, setup: LiveSetup(), ring: ring)
-        let transcriber = LiveTranscriber(session: session, modelID: "test-live", replacementRules: { [] })
+        let transcriber = LiveTranscriber(
+            session: session, modelID: "test-live",
+            replacementRules: { [] }, warmTransport: warmTransport
+        )
         return (transcriber, transport)
     }
 
@@ -171,5 +175,72 @@ final class LiveFallbackTests: XCTestCase {
         let (transcriber, _) = makeTranscriber(script: [])
         let result = await transcriber.finish(deadline: 0.3, framesWritten: 800)
         XCTAssertNil(result)
+    }
+
+    // MARK: - Warm socket adoption
+
+    /// The hot path the whole pool exists for: begin() takes the warm socket
+    /// and never touches the cold transport at all.
+    func testBeginPrefersTheWarmSocket() async throws {
+        let warm = LiveTranscriptionSessionTests.FakeTransport(script: [
+            frame(["type": "session.updated"]),
+            frame([
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "warm and instant",
+            ]),
+        ])
+        let (transcriber, cold) = makeTranscriber(script: [], warmTransport: warm)
+        cold.connectError = URLError(.cannotConnectToHost)
+        try await transcriber.begin()
+        transcriber.enqueue(Data(repeating: 0x01, count: 1_600))
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let result = await transcriber.finish(deadline: 2.0, framesWritten: 800)
+        XCTAssertEqual(result?.cleanedTranscript, "warm and instant")
+        XCTAssertEqual(cold.connectCount, 0, "cold transport must not be used once warm is adopted")
+    }
+
+    /// The freeze this type exists to prevent: a socket that accepts resume()
+    /// but never completes a send must not hang begin() forever — the whole
+    /// fallback only works if begin() returns. WebSocketTransport.send is now
+    /// bounded at 5s; this exercises the transcriber's contract that a hanging
+    /// socket still falls back rather than freezing the dictation.
+    func testWarmSocketThatHangsSendStillFallsBack() async throws {
+        let warm = LiveTranscriptionSessionTests.FakeTransport(script: [])
+        warm.hangSend = true
+        let (transcriber, cold) = makeTranscriber(script: [
+            frame(["type": "session.updated"]),
+            frame([
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "cold saved it",
+            ]),
+        ], warmTransport: warm)
+        // begin() must return — if it hung, this test would never get here.
+        try await transcriber.begin()
+        transcriber.enqueue(Data(repeating: 0x01, count: 1_600))
+        let result = await transcriber.finish(deadline: 2.0, framesWritten: 800)
+        XCTAssertEqual(result?.cleanedTranscript, "cold saved it")
+        XCTAssertEqual(cold.connectCount, 1)
+    }
+
+    /// A warm socket whose session.update is refused is a dead socket — the
+    /// transcriber must close it and cold-start, not surface an error.
+    func testWarmSocketThatFailsSetupFallsBackToCold() async throws {
+        let warm = LiveTranscriptionSessionTests.FakeTransport(script: [
+            frame(["error": ["message": "session expired"]]),
+        ])
+        let (transcriber, cold) = makeTranscriber(script: [
+            frame(["type": "session.updated"]),
+            frame([
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "cold but correct",
+            ]),
+        ], warmTransport: warm)
+        try await transcriber.begin()
+        transcriber.enqueue(Data(repeating: 0x01, count: 1_600))
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let result = await transcriber.finish(deadline: 2.0, framesWritten: 800)
+        XCTAssertEqual(result?.cleanedTranscript, "cold but correct")
+        XCTAssertEqual(cold.connectCount, 1, "the cold transport takes over after warm setup fails")
+        XCTAssertEqual(warm.closeCount, 1, "a refused warm socket must be closed, not left open")
     }
 }

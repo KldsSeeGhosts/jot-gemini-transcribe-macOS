@@ -417,7 +417,7 @@ struct PrivacyPane: View {
 
             Section {
                 LabeledContent("Audio") { Text("Sent to OpenAI Realtime using your local OAuth session") }
-                LabeledContent("Transcript text") { Text("Not sent in a separate cleanup request") }
+                LabeledContent("Transcript text") { Text("Sent to CPA proxy if tone matching is enabled; otherwise stays local") }
                 LabeledContent("Dictionary terms") { Text("Sent with the audio, so names are spelled right as you speak") }
                 LabeledContent("Everything else") { Text("Never leaves this Mac") }
             } header: {
@@ -448,9 +448,14 @@ struct AdvancedPane: View {
     /// Placeholders derive from the REAL defaults — a hardcoded string went
     /// stale the day the preview model was retired (dogfood).
     private static let defaultConfig = OpenAIConfig()
+    private static let defaultCleanupConfig = CleanupConfig()
     @State private var oauthSource = OpenAIOAuthStore.localLoginSource()
     @State private var transcribeModel = SettingsStore().transcribeModelOverride ?? ""
     @State private var liveModel = SettingsStore().liveModelOverride ?? ""
+    @State private var cleanupModel = SettingsStore().cleanupModelOverride ?? ""
+    @State private var cleanupReasoningEffort = SettingsStore().cleanupReasoningEffortOverride ?? ""
+    @State private var cleanupEndpoint = SettingsStore().cleanupEndpointOverride ?? ""
+    @State private var cleanupApiKey = SettingsStore().cleanupApiKeyOverride ?? ""
 
     var body: some View {
         Form {
@@ -508,6 +513,40 @@ struct AdvancedPane: View {
                 Text("Model overrides")
             } footer: {
                 Text("Both paths use OpenAI Realtime. Leave these blank for the defaults.")
+            }
+
+            Section {
+                TextField("Cleanup model", text: $cleanupModel,
+                          prompt: Text(Self.defaultCleanupConfig.model))
+                    .font(JotUI.TypeScale.code)
+                    .onChange(of: cleanupModel) { _, value in
+                        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                        settings.setCleanupModelOverride(trimmed.isEmpty ? nil : trimmed)
+                    }
+                TextField("Reasoning effort", text: $cleanupReasoningEffort,
+                          prompt: Text(Self.defaultCleanupConfig.reasoningEffort))
+                    .font(JotUI.TypeScale.code)
+                    .onChange(of: cleanupReasoningEffort) { _, value in
+                        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                        settings.setCleanupReasoningEffortOverride(trimmed.isEmpty ? nil : trimmed)
+                    }
+                TextField("Cleanup proxy URL", text: $cleanupEndpoint,
+                          prompt: Text(Self.defaultCleanupConfig.endpoint.absoluteString))
+                    .font(JotUI.TypeScale.code)
+                    .onChange(of: cleanupEndpoint) { _, value in
+                        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                        settings.setCleanupEndpointOverride(trimmed.isEmpty ? nil : trimmed)
+                    }
+                SecureField("Proxy API key", text: $cleanupApiKey)
+                    .font(JotUI.TypeScale.code)
+                    .onChange(of: cleanupApiKey) { _, value in
+                        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                        settings.setCleanupApiKeyOverride(trimmed.isEmpty ? nil : trimmed)
+                    }
+            } header: {
+                Text("Smart cleanup pass")
+            } footer: {
+                Text("Used when 'Match tone to the app you're in' is enabled. Defaults to Gemini 3.1 Flash Lite on your CPA proxy.")
             }
 
         }

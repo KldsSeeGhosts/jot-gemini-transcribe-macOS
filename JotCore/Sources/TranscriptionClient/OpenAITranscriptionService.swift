@@ -21,13 +21,16 @@ import Foundation
 public struct OpenAITranscriptionService: TranscriptionServicing {
     private let oauth: OpenAIOAuthStore
     private let settings: SettingsStore
+    private let cleanupClient: CPACleanupClient
 
     public init(
         oauth: OpenAIOAuthStore = OpenAIOAuthStore(),
-        settings: SettingsStore = SettingsStore()
+        settings: SettingsStore = SettingsStore(),
+        cleanupClient: CPACleanupClient = CPACleanupClient()
     ) {
         self.oauth = oauth
         self.settings = settings
+        self.cleanupClient = cleanupClient
     }
 
     public func transcribe(
@@ -81,14 +84,25 @@ public struct OpenAITranscriptionService: TranscriptionServicing {
 
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw TranscriptionError.emptyTranscript }
-        let cleaned = ReplacementEngine.apply(
-            dictionary.replacementRules(),
-            to: trimmed
-        )
+
+        let policy = settings.formattingPolicy
+        guard policy.cleanupPass else {
+            let cleaned = ReplacementEngine.apply(
+                dictionary.replacementRules(),
+                to: trimmed
+            )
+            return TranscriptionResult(
+                rawTranscript: trimmed,
+                cleanedTranscript: cleaned,
+                modelID: config.transcribeModel
+            )
+        }
+
+        let cleaned = await cleanupOrFallback(raw: trimmed, context: context)
         return TranscriptionResult(
             rawTranscript: trimmed,
             cleanedTranscript: cleaned,
-            modelID: config.transcribeModel
+            modelID: "\(config.transcribeModel)+\(settings.cleanupConfig.model)"
         )
     }
 
@@ -298,5 +312,42 @@ public struct OpenAITranscriptionService: TranscriptionServicing {
             return .rateLimitedTransient
         }
         return .badRequest(detail)
+    }
+
+    public func cleanupOrFallback(raw: String, context: DictationContext) async -> String {
+        let tone = PromptV1.toneCategory(forBundleID: context.targetAppBundleID)
+        let dictionary = DictionaryStore()
+        let prompt = PromptV1.cleanupPrompt(
+            raw: raw,
+            tone: tone,
+            vocabulary: dictionary.sanitizedVocabulary(),
+            spellings: dictionary.spellings()
+        )
+        let cleanupConfig = settings.cleanupConfig
+        do {
+            let response = try await cleanupClient.cleanup(
+                prompt: prompt,
+                config: cleanupConfig
+            )
+            let cleaned = ValidationGate.stripArtifacts(response)
+            let verdict = ValidationGate.validate(raw: raw, cleaned: cleaned)
+            guard verdict.accepted else {
+                let trips = settings.recordGateTrip()
+                Log.transcription.warning("cleanup gate REJECTED (\(verdict.reason ?? "?", privacy: .public), trip #\(trips) in 24h) — inserting raw")
+                autoDegradeIfNeeded(trips: trips)
+                return ReplacementEngine.apply(dictionary.replacementRules(), to: raw)
+            }
+            return ReplacementEngine.apply(dictionary.replacementRules(), to: cleaned)
+        } catch {
+            Log.transcription.info("cleanup unavailable (\(String(describing: error), privacy: .public)) — inserting raw")
+            return ReplacementEngine.apply(dictionary.replacementRules(), to: raw)
+        }
+    }
+
+    private func autoDegradeIfNeeded(trips: Int) {
+        guard trips >= 3, settings.smartCleanupPassEnabled else { return }
+        settings.setSmartCleanupPass(false)
+        NotificationCenter.default.post(name: .gtSmartFormattingAutoDegraded, object: nil)
+        Log.transcription.warning("cleanup unreliable (3 gate trips in 24h) — tone pass auto-disabled; smart transcription unaffected")
     }
 }

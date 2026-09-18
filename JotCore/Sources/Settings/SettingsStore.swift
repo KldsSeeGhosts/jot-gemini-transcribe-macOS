@@ -80,6 +80,26 @@ public struct SettingsStore: Sendable {
         return config
     }
 
+    public var cleanupConfig: CleanupConfig {
+        var config = CleanupConfig()
+        if let url = Self.usableEndpointURL(Self.defaults.string(forKey: "cleanupEndpointOverride")) {
+            config.endpoint = url
+        }
+        if let key = Self.defaults.string(forKey: "cleanupApiKeyOverride"), !key.isEmpty {
+            config.apiKey = key
+        }
+        if let model = Self.defaults.string(forKey: "cleanupModelOverride"), !model.isEmpty {
+            config.model = model
+        }
+        if let effort = Self.defaults.string(forKey: "cleanupReasoningEffortOverride"), !effort.isEmpty {
+            config.reasoningEffort = effort
+        }
+        if let timeout = Self.defaults.object(forKey: "cleanupTimeoutOverride") as? Double, timeout > 0 {
+            config.timeout = timeout
+        }
+        return config
+    }
+
     /// Kept so older Gemini-focused tests and downstream forks still compile.
     /// The shipping app uses `openAIConfig`.
     public var geminiConfig: GeminiConfig {
@@ -240,6 +260,9 @@ public struct SettingsStore: Sendable {
     public var transcribeModelOverride: String? { Self.defaults.string(forKey: "transcribeModelOverride") }
     public var liveModelOverride: String? { Self.defaults.string(forKey: "liveModelOverride") }
     public var cleanupModelOverride: String? { Self.defaults.string(forKey: "cleanupModelOverride") }
+    public var cleanupEndpointOverride: String? { Self.defaults.string(forKey: "cleanupEndpointOverride") }
+    public var cleanupApiKeyOverride: String? { Self.defaults.string(forKey: "cleanupApiKeyOverride") }
+    public var cleanupReasoningEffortOverride: String? { Self.defaults.string(forKey: "cleanupReasoningEffortOverride") }
 
     public func setEndpointOverride(_ raw: String?) {
         Self.set(raw, forKey: "endpointOverride")
@@ -255,6 +278,18 @@ public struct SettingsStore: Sendable {
 
     public func setCleanupModelOverride(_ raw: String?) {
         Self.set(raw, forKey: "cleanupModelOverride")
+    }
+
+    public func setCleanupEndpointOverride(_ raw: String?) {
+        Self.set(raw, forKey: "cleanupEndpointOverride")
+    }
+
+    public func setCleanupApiKeyOverride(_ raw: String?) {
+        Self.set(raw, forKey: "cleanupApiKeyOverride")
+    }
+
+    public func setCleanupReasoningEffortOverride(_ raw: String?) {
+        Self.set(raw, forKey: "cleanupReasoningEffortOverride")
     }
 
     /// Days to keep audio files (transcripts are kept until deleted). 0 = forever.

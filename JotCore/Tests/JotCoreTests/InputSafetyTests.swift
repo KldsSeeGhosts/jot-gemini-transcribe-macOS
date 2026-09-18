@@ -14,12 +14,19 @@ final class InputSafetyTests: XCTestCase {
 
     private func event(code: Int64, flags: CGEventFlags = [], repeatKey: Bool = false,
                        synthetic: Bool = false) -> CGEvent {
-        let event = CGEvent(source: nil)!
+        let event = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: CGKeyCode(code),
+            keyDown: true
+        )!
         event.flags = flags
-        event.setIntegerValueField(.keyboardEventKeycode, value: code)
         event.setIntegerValueField(.keyboardEventAutorepeat, value: repeatKey ? 1 : 0)
         if synthetic { event.setIntegerValueField(.eventSourceUserData, value: SyntheticEventTag.magic) }
         return event
+    }
+
+    private func passes(_ tap: HotkeyTapSession, type: CGEventType, event: CGEvent) -> Bool {
+        tap.handle(type: type, event: event) != nil
     }
 
     func testRecoveryBacksOffAndCapsDelay() {
@@ -58,15 +65,15 @@ final class InputSafetyTests: XCTestCase {
     func testOrdinaryKeyboardAndMouseEventsPassThrough() {
         let tap = session()
         for type in [CGEventType.keyDown, .keyUp, .leftMouseDown, .rightMouseDown, .mouseMoved] {
-            XCTAssertNotNil(tap.handle(type: type, event: event(code: 0)))
+            XCTAssertTrue(passes(tap, type: type, event: event(code: 0)))
         }
-        XCTAssertNotNil(tap.handle(type: .flagsChanged, event: event(code: 56, flags: .maskShift)))
+        XCTAssertTrue(passes(tap, type: .flagsChanged, event: event(code: 56, flags: .maskShift)))
     }
 
     func testSyntheticModifierDoesNotStartDictation() {
         let tap = session()
-        XCTAssertNotNil(tap.handle(type: .flagsChanged,
-                                  event: event(code: 63, flags: .maskSecondaryFn, synthetic: true)))
+        XCTAssertTrue(passes(tap, type: .flagsChanged,
+                             event: event(code: 63, flags: .maskSecondaryFn, synthetic: true)))
         XCTAssertEqual(tap.processor.phase, .idle)
     }
 
@@ -77,8 +84,8 @@ final class InputSafetyTests: XCTestCase {
         XCTAssertEqual(tap.processor.phase, .locked)
         XCTAssertNil(tap.handle(type: .keyDown, event: event(code: 49, repeatKey: true)))
         XCTAssertNil(tap.handle(type: .keyUp, event: event(code: 49)))
-        XCTAssertNotNil(tap.handle(type: .keyDown, event: event(code: 49)))
-        XCTAssertNotNil(tap.handle(type: .keyUp, event: event(code: 49)))
+        XCTAssertTrue(passes(tap, type: .keyDown, event: event(code: 49)))
+        XCTAssertTrue(passes(tap, type: .keyUp, event: event(code: 49)))
     }
 
     func testEscapeConsumesItsWholeGestureThenPassesOrdinaryEscape() {
@@ -87,7 +94,7 @@ final class InputSafetyTests: XCTestCase {
         XCTAssertNil(tap.handle(type: .keyDown, event: event(code: 53)))
         XCTAssertNil(tap.handle(type: .keyDown, event: event(code: 53, repeatKey: true)))
         XCTAssertNil(tap.handle(type: .keyUp, event: event(code: 53)))
-        XCTAssertNotNil(tap.handle(type: .keyDown, event: event(code: 53)))
+        XCTAssertTrue(passes(tap, type: .keyDown, event: event(code: 53)))
     }
 
     func testSameKeyConfigurationPreservesReleaseEdge() {
@@ -102,7 +109,7 @@ final class InputSafetyTests: XCTestCase {
         let finalized = expectation(description: "interrupted recording finalized")
         let tap = session { if $0 == .finalize { finalized.fulfill() } }
         _ = tap.handle(type: .flagsChanged, event: event(code: 63, flags: .maskSecondaryFn))
-        XCTAssertNotNil(tap.handle(type: .tapDisabledByTimeout, event: event(code: 0)))
+        XCTAssertTrue(passes(tap, type: .tapDisabledByTimeout, event: event(code: 0)))
         XCTAssertEqual(tap.processor.phase, .idle)
         wait(for: [finalized], timeout: 2)
     }
@@ -115,9 +122,10 @@ final class InputSafetyTests: XCTestCase {
             entered.signal()
             _ = release.wait(timeout: .now() + 5)
         }
+        let keyDown = event(code: 63, flags: .maskSecondaryFn)
         defer { release.signal() }
         DispatchQueue.global().async {
-            _ = tap.handle(type: .flagsChanged, event: self.event(code: 63, flags: .maskSecondaryFn))
+            _ = tap.handle(type: .flagsChanged, event: keyDown)
             returned.fulfill()
         }
         XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)

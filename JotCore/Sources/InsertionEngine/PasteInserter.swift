@@ -107,26 +107,37 @@ public final class PasteInserter {
     public static func warmKeyboardLayout() { _ = Sauce.shared }
 
     private static func postCmdV() async -> Bool {
-        guard !Task.isCancelled,
-              let source = CGEventSource(stateID: .privateState) else { return false }
-        // Synthetic paste must never suppress the user's mouse or keyboard.
-        source.localEventsSuppressionInterval = 0
-        let permitted: CGEventFilterMask = [
-            .permitLocalMouseEvents, .permitLocalKeyboardEvents, .permitSystemDefinedEvents
-        ]
-        source.setLocalEventsFilterDuringSuppressionState(permitted, state: .eventSuppressionStateSuppressionInterval)
-        source.setLocalEventsFilterDuringSuppressionState(permitted, state: .eventSuppressionStateRemoteMouseDrag)
+        guard !Task.isCancelled else { return false }
         let keyCode = CGKeyCode(Sauce.shared.keyCode(for: .v))
-        guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
-            return false
-        }
-        for event in [down, up] {
-            event.flags = .maskCommand
-            event.setIntegerValueField(.eventSourceUserData, value: SyntheticEventTag.magic)
-        }
         return await withCheckedContinuation { continuation in
             eventQueue.async {
+                guard let source = CGEventSource(stateID: .privateState) else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                // Synthetic paste must never suppress the user's mouse or keyboard.
+                source.localEventsSuppressionInterval = 0
+                let permitted: CGEventFilterMask = [
+                    .permitLocalMouseEvents, .permitLocalKeyboardEvents, .permitSystemDefinedEvents
+                ]
+                source.setLocalEventsFilterDuringSuppressionState(
+                    permitted, state: .eventSuppressionStateSuppressionInterval
+                )
+                source.setLocalEventsFilterDuringSuppressionState(
+                    permitted, state: .eventSuppressionStateRemoteMouseDrag
+                )
+                guard let down = CGEvent(
+                    keyboardEventSource: source, virtualKey: keyCode, keyDown: true
+                ), let up = CGEvent(
+                    keyboardEventSource: source, virtualKey: keyCode, keyDown: false
+                ) else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                for event in [down, up] {
+                    event.flags = .maskCommand
+                    event.setIntegerValueField(.eventSourceUserData, value: SyntheticEventTag.magic)
+                }
                 // No actor hop between down/up: a busy main actor or cancelled
                 // dictation cannot strand a pressed synthetic key. Serialize all
                 // pairs and always post the release before resuming the caller.

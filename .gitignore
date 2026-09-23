@@ -17,3 +17,6 @@ Jot.xcodeproj/
 Package.resolved
 build/
 xcuserdata/
+
+# Local app bundle (build artifact)
+Jot.app/

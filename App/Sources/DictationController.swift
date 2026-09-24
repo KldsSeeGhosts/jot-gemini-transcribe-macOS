@@ -96,10 +96,17 @@ final class DictationController {
             }),
             setup: setup
         )
+        let service = OpenAITranscriptionService(oauth: oauth, settings: settings)
         return LiveTranscriber(
             session: session,
             modelID: config.liveModel,
             replacementRules: { DictionaryStore().replacementRules() },
+            postProcess: { raw in
+                guard settings.formattingPolicy.cleanupPass else {
+                    return ReplacementEngine.apply(DictionaryStore().replacementRules(), to: raw)
+                }
+                return await service.cleanupOrFallback(raw: raw, context: context)
+            },
             warmTransport: warmTransport
         )
     }
